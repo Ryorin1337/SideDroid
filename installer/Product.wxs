@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="SideDroid"
+           Manufacturer="SideDroid"
+           Version="$(var.Version)"
+           UpgradeCode="6B7D2F40-9A1E-4C53-8E2B-1F3A7C5D9E10"
+           Scope="perMachine"
+           Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of SideDroid is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="SideDroid.ico" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="SideDroid.ico" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SideDroid" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.Dist)\**" />
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="3E8A1B6C-2D47-4F90-A5C1-7B9E0D2F4A61">
+        <Shortcut Id="ConsoleShortcut" Name="SideDroid" Target="[INSTALLFOLDER]console\SideDroid.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\SideDroid" Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- The tray host starts with Windows, so a phone can connect at any time. -->
+    <Component Id="AutoStart" Directory="INSTALLFOLDER" Guid="9C2F6A81-4B3D-47E2-A0D5-1E8C7B3F6D22">
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="SideDroid"
+                     Type="string" Value="&quot;[INSTALLFOLDER]sidedroid-host.exe&quot;" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="SideDroid">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="AutoStart" />
+    </Feature>
+
+    <!-- Lets phones reach the host. Scoped to this one program, not to a port. -->
+    <SetProperty Id="FirewallAdd" Sequence="execute" Before="FirewallAdd"
+                 Value="&quot;[System64Folder]netsh.exe&quot; advfirewall firewall add rule name=&quot;SideDroid Host&quot; dir=in action=allow profile=private,domain program=&quot;[INSTALLFOLDER]sidedroid-host.exe&quot; enable=yes" />
+    <CustomAction Id="FirewallAdd" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <SetProperty Id="FirewallRemove" Sequence="execute" Before="FirewallRemove"
+                 Value="&quot;[System64Folder]netsh.exe&quot; advfirewall firewall delete rule name=&quot;SideDroid Host&quot;" />
+    <CustomAction Id="FirewallRemove" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- A running host holds its files, and must not outlive its own removal. -->
+    <SetProperty Id="StopHost" Sequence="execute" Before="StopHost"
+                 Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM sidedroid-host.exe" />
+    <CustomAction Id="StopHost" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Removes the driver only if SideDroid is the one that installed it. -->
+    <SetProperty Id="DriverRemove" Sequence="execute" Before="DriverRemove"
+                 Value="&quot;[INSTALLFOLDER]sidedroid-driver-tool.exe&quot; uninstall" />
+    <CustomAction Id="DriverRemove" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- The console offers the driver install on first start, with Windows' own prompts. -->
+    <CustomAction Id="LaunchConsole" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]console\SideDroid.exe&quot;" Execute="immediate" Impersonate="yes" Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopHost" Before="RemoveFiles" Condition="Installed" />
+      <Custom Action="DriverRemove" After="StopHost" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="FirewallRemove" After="DriverRemove" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="FirewallAdd" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="LaunchConsole" After="InstallFinalize" Condition="NOT Installed AND UILevel &gt;= 3" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

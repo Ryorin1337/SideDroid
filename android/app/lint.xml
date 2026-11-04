@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Android 8 is supported: a call to a newer API must fail the build. -->
+    <issue id="NewApi" severity="fatal" />
+    <issue id="InlinedApi" severity="warning" />
+</lint>

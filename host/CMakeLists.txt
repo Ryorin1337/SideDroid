@@ -36,6 +36,10 @@ add_executable(sd-loopback tools/sd_loopback.cpp)
 target_link_libraries(sd-loopback PRIVATE sidedroid_core)
 target_compile_definitions(sd-loopback PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+# Checks the mDNS announcement without a phone.
+add_executable(sd-mdns-probe tools/sd_mdns_probe.cpp)
+target_compile_definitions(sd-mdns-probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+
 if(SIDEDROID_BUILD_TESTS)
     add_executable(host_tests tests/host_tests.cpp)
     target_link_libraries(host_tests PRIVATE sidedroid_host_lib)

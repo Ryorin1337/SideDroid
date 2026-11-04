@@ -9,6 +9,7 @@ namespace sd {
 
 static VOID WINAPI onRegistered(DWORD status, PVOID, PDNS_SERVICE_INSTANCE instance) {
     if (status != ERROR_SUCCESS) logf("mDNS registration failed: %lu", status);
+    else logf("mDNS service registered");
     if (instance) DnsServiceFreeInstance(instance);
 }
 

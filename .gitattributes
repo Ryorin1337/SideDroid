@@ -1,0 +1,8 @@
+# Build scripts must keep Unix line endings for WSL.
+*.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.zip binary
+*.ico binary
+*.png binary
+*.jar binary

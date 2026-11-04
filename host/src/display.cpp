@@ -80,6 +80,17 @@ bool outputHasMode(const std::wstring& deviceName, const DisplayMode& m) {
 }
 
 bool attachOutput(const std::wstring& deviceName, const DisplayMode& m) {
+    // A pipeline rebuild for bitrate reasons asks for the mode it already has.
+    // Setting it again would make the whole desktop flicker.
+    if (auto o = findOutputByName(deviceName); o && o->attached) {
+        DEVMODEW cur{};
+        cur.dmSize = sizeof(cur);
+        if (EnumDisplaySettingsExW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &cur, 0) && cur.dmPelsWidth == m.width &&
+            cur.dmPelsHeight == m.height && cur.dmDisplayFrequency == m.hz) {
+            return true;
+        }
+    }
+
     // Right of everything else, top aligned.
     LONG x = 0;
     for (const auto& o : listOutputs())

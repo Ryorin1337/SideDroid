@@ -177,6 +177,10 @@ int uninstall() {
     }
     DeleteFileW(kMarker);
     RemoveDirectoryW(kMarkerDir);
+    // This config exists only because we installed the driver.
+    const std::wstring cfg = std::wstring(kConfigDir) + L"\\vdd_settings.xml";
+    DeleteFileW(cfg.c_str());
+    RemoveDirectoryW(kConfigDir);  // only succeeds when empty
     printf("removed %d device(s)\n", removed);
     return 0;
 }

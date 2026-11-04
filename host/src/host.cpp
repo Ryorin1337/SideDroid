@@ -9,6 +9,8 @@
 #include "encoder.h"
 #include "log.h"
 
+#include <shellapi.h>
+
 namespace sd {
 
 namespace {
@@ -257,8 +259,11 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
             *mode = *best;
         }
     }
+    // A display the user already had on the desktop, from their own VDD install,
+    // stays there when the phone leaves. Otherwise it was only ever here for us.
+    const bool wasAttached = vdd->attached;
     if (!attachOutput(*device, *mode)) return false;
-    host_.markOutputAttached(*device);
+    if (!wasAttached || host_.ownsDriver()) host_.markOutputAttached(*device);
     return true;
 }
 
@@ -719,6 +724,12 @@ bool Host::start() {
     store_.load();
     // Wireless can be toggled at runtime, so the check happens per connection.
     listener_ = Socket::tcpListen(opts_.port, false);
+    ownsDriver_ = GetFileAttributesW(L"C:\\ProgramData\\SideDroid\\driver-installed-by-sidedroid") != INVALID_FILE_ATTRIBUTES;
+    if (ownsDriver_ && opts_.sourceOverride.empty()) {
+        // The driver creates its monitor at boot. With no phone connected it must
+        // not stay on the desktop, where windows could open on a screen nobody sees.
+        if (auto v = findVddOutput(); v && v->attached) markOutputAttached(v->deviceName);
+    }
     if (!listener_.valid()) {
         logf("cannot listen on port %d", opts_.port);
         return false;
@@ -923,6 +934,24 @@ std::string Host::handleCommand(const std::string& json) {
         std::lock_guard<std::mutex> lock(pairMutex_);
         pairingCode_.clear();
         return R"({"ok":true})";
+    }
+    if (cmd == "install_driver") {
+        // Runs the bundled tool elevated: Windows asks the user, twice if it must
+        // (once for elevation, once for the driver's publisher).
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        std::wstring dir(self);
+        dir.erase(dir.find_last_of(L'\\'));
+        const std::wstring tool = dir + L"\\sidedroid-driver-tool.exe";
+        const std::wstring args = L"install \"" + dir + L"\\driver\"";
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.lpVerb = L"runas";
+        sei.lpFile = tool.c_str();
+        sei.lpParameters = args.c_str();
+        sei.nShow = SW_HIDE;
+        const bool started = ShellExecuteExW(&sei) != FALSE;
+        if (!started) logf("cannot start driver tool: %lu", GetLastError());
+        return std::string(R"({"ok":)") + (started ? "true" : "false") + "}";
     }
     if (cmd == "unpair") {
         bool removed = store_.removePaired(jsonGetString(json, "id"));

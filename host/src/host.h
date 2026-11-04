@@ -50,6 +50,8 @@ public:
     void publishStatus(const std::function<void(struct LiveStatus&)>& edit);
     void markOutputAttached(const std::wstring& device);
     Settings currentSettings() { return store_.settings(); }
+    // True when SideDroid installed the driver, so the display is ours to manage.
+    bool ownsDriver() const { return ownsDriver_; }
 
 private:
     void acceptLoop();
@@ -64,6 +66,7 @@ private:
     std::unique_ptr<IpcServer> ipc_;
     Socket listener_;
     std::atomic<bool> running_{false};
+    bool ownsDriver_ = false;
     std::thread acceptThread_;
 
     std::mutex sessionMutex_;

@@ -132,6 +132,12 @@ static void testTouchMap() {
     CHECK(d.x == -1080 && d.y == 2199);
 }
 
+static void testTouchDevice() {
+    // Creates a real synthetic touch device, without injecting anything.
+    TouchInjector t;
+    CHECK(t.available());
+}
+
 static void testAdb() {
     auto d = parseAdbDevices(
         "* daemon not running; starting now at tcp:5037\r\n"
@@ -162,6 +168,7 @@ int main() {
     testChooseMode();
     testVddXml();
     testTouchMap();
+    testTouchDevice();
     testAdb();
     testJson();
     if (g_failures) {
