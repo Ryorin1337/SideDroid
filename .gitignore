@@ -1,0 +1,13 @@
+build/
+out/
+.gradle/
+**/build/
+local.properties
+.idea/
+.kotlin/
+*.iml
+*.log
+*.user
+.vs/
+captures/
+.DS_Store
