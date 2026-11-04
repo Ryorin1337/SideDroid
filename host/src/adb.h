@@ -24,6 +24,7 @@ public:
     ~AdbWatcher() { stop(); }
     void start();
     void stop();
+    void killServer();
     bool adbFound() const { return found_.load(); }
     std::vector<AdbDevice> devices();
 

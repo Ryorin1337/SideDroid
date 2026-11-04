@@ -115,23 +115,32 @@ fun parseStatus(line: String): HostStatus {
 class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""", private val mayStartHost: Boolean = true) {
     private var pipe: RandomAccessFile? = null
     private var launchAttemptedAt = 0L
+    private var everReached = false
 
     private fun connect(): RandomAccessFile? {
         pipe?.let { return it }
         return try {
-            RandomAccessFile(pipePath, "rw").also { pipe = it }
+            RandomAccessFile(pipePath, "rw").also {
+                pipe = it
+                everReached = true
+            }
         } catch (_: Exception) {
-            startHostOnce()
+            // Lost after working means the user quit it from the tray. Bringing it
+            // straight back would undo that, so this waits for them to ask.
+            if (!everReached) startHost()
             null
         }
     }
 
+    /** True once a host answered and then went away. */
+    val serviceStopped: Boolean get() = everReached && pipe == null
+
     // Harmless when a host is already running: a second one exits right away, and it
     // never opens a console in return.
-    private fun startHostOnce() {
+    fun startHost() {
         if (!mayStartHost) return
         val now = System.currentTimeMillis()
-        if (now - launchAttemptedAt < 10_000) return
+        if (now - launchAttemptedAt < 5_000) return
         launchAttemptedAt = now
         val installDir = File(System.getProperty("compose.application.resources.dir") ?: return)
         var dir: File? = installDir

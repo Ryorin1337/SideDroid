@@ -42,6 +42,7 @@ data class ConsoleActions(
     val onStartPairing: () -> Unit = {},
     val onCancelPairing: () -> Unit = {},
     val onUnpair: (String) -> Unit = {},
+    val onStartService: () -> Unit = {},
 )
 
 
@@ -49,6 +50,7 @@ private fun errorText(code: String) = when (code) {
     "virtual_display_missing" -> "未找到虚拟显示驱动"
     "virtual_display_config_denied" -> "无法写入虚拟显示配置，已使用最接近的分辨率"
     "virtual_display_layout" -> "无法把虚拟屏设为独立显示器"
+    "port_in_use" -> "端口 27183 被其他程序占用，正在重试"
     "no_encoder" -> "没有找到可用的硬件编码器"
     else -> code
 }
@@ -61,13 +63,31 @@ private fun waitingHint(s: HostStatus) = when {
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun ConsoleScreen(status: HostStatus, actions: ConsoleActions, modifier: Modifier = Modifier) {
+fun ConsoleScreen(
+    status: HostStatus,
+    actions: ConsoleActions,
+    modifier: Modifier = Modifier,
+    serviceStopped: Boolean = false,
+    startupFailed: Boolean = false,
+) {
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         val problem = !status.reachable || !status.virtualDisplayInstalled || status.error.isNotEmpty()
         when {
+            !status.reachable && serviceStopped -> StatusHero(
+                ConnectionVisual.Idle,
+                "服务已停止",
+                "启动后手机才能连接",
+                actions = { Button(onClick = actions.onStartService) { Text("启动服务") } },
+            )
+            !status.reachable && startupFailed -> StatusHero(
+                ConnectionVisual.Problem,
+                "服务没有启动",
+                "详情见 %LOCALAPPDATA%\\SideDroid\\host.log",
+                actions = { Button(onClick = actions.onStartService) { Text("重试") } },
+            )
             !status.reachable -> StatusHero(ConnectionVisual.Waiting, "正在启动服务", "稍等片刻")
             !status.virtualDisplayInstalled -> StatusHero(
                 ConnectionVisual.Problem,
@@ -83,6 +103,7 @@ fun ConsoleScreen(status: HostStatus, actions: ConsoleActions, modifier: Modifie
                 icon = if (status.transport == "wifi") SdIcons.Wifi else SdIcons.Usb,
                 actions = { Button(onClick = actions.onDisconnect) { Text("断开连接") } },
             )
+            status.error.isNotEmpty() -> StatusHero(ConnectionVisual.Problem, "暂时无法连接", errorText(status.error))
             else -> StatusHero(ConnectionVisual.Waiting, "等待手机连接", waitingHint(status))
         }
 

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include <vector>
 
 #include "log.h"
 
@@ -45,15 +46,28 @@ static bool runCapture(const std::wstring& exe, const std::wstring& args, std::s
     if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = wr;
-    si.hStdError = wr;
+    // Named explicitly: adb may leave a server running for hours, and whatever
+    // it inherits stays open that long.
+    SIZE_T listSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &listSize);
+    std::vector<char> listBuf(listSize);
+    auto list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(listBuf.data());
+    InitializeProcThreadAttributeList(list, 1, 0, &listSize);
+    HANDLE inherited[1] = {wr};
+    UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr);
+
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.StartupInfo.wShowWindow = SW_HIDE;
+    si.StartupInfo.hStdOutput = wr;
+    si.StartupInfo.hStdError = wr;
+    si.lpAttributeList = list;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = L"\"" + exe + L"\" " + args;
-    BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                             nullptr, nullptr, &si.StartupInfo, &pi);
+    DeleteProcThreadAttributeList(list);
     CloseHandle(wr);
     if (!ok) {
         CloseHandle(rd);
@@ -87,6 +101,11 @@ static bool runCapture(const std::wstring& exe, const std::wstring& args, std::s
     CloseHandle(rd);
     if (out) *out = std::move(text);
     return finished && code == 0;
+}
+
+void AdbWatcher::killServer() {
+    const auto adb = adbPath();
+    if (!adb.empty()) runCapture(adb, L"kill-server", nullptr, 8000);
 }
 
 void AdbWatcher::start() {

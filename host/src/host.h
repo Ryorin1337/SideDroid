@@ -83,6 +83,7 @@ private:
     void acceptLoop();
     std::string statusJson();
     void detachIfIdle(bool force);
+    bool ensureListening();
     void recoverLayoutAtStart();
     std::optional<std::string> takePairingCodeAttempt();
 
@@ -92,6 +93,7 @@ private:
     Discovery discovery_;
     std::unique_ptr<IpcServer> ipc_;
     Socket listener_;
+    int listenFailures_ = 0;
     std::atomic<bool> running_{false};
     bool ownsDriver_ = false;
     std::thread acceptThread_;

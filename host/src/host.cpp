@@ -839,13 +839,8 @@ bool Host::start() {
     netInit();
     store_.load();
     // Wireless can be toggled at runtime, so the check happens per connection.
-    listener_ = Socket::tcpListen(opts_.port, false);
     ownsDriver_ = GetFileAttributesW(L"C:\\ProgramData\\SideDroid\\driver-installed-by-sidedroid") != INVALID_FILE_ATTRIBUTES;
     recoverLayoutAtStart();
-    if (!listener_.valid()) {
-        logf("cannot listen on port %d", opts_.port);
-        return false;
-    }
     running_ = true;
     acceptThread_ = std::thread(&Host::acceptLoop, this);
     if (opts_.enableAdb) adb_.start();
@@ -866,9 +861,9 @@ void Host::stop() {
         std::lock_guard<std::mutex> lock(sessionMutex_);
         if (session_) session_->requestStop();
     }
-    listener_.shutdownBoth();
-    listener_.close();
+    // The accept loop wakes within half a second, and only then is the socket free to close.
     if (acceptThread_.joinable()) acceptThread_.join();
+    listener_.close();
     if (sessionThread_.joinable()) sessionThread_.join();
     if (ipc_) ipc_->stop();
     adb_.stop();
@@ -887,9 +882,38 @@ std::optional<std::string> Host::takePairingCodeAttempt() {
     return pairingCode_;
 }
 
+bool Host::ensureListening() {
+    if (listener_.valid()) return true;
+    listener_ = Socket::tcpListen(opts_.port, false);
+    if (listener_.valid()) {
+        if (listenFailures_ > 0) {
+            logf("listening on port %d", opts_.port);
+            publishStatus([](LiveStatus& l) { if (l.error == "port_in_use") l.error.clear(); });
+        }
+        listenFailures_ = 0;
+        return true;
+    }
+    if (listenFailures_++ == 0) {
+        logf("cannot listen on port %d", opts_.port);
+        publishStatus([](LiveStatus& l) { l.error = "port_in_use"; });
+    }
+    // Earlier versions let the adb server inherit the listening socket, which then
+    // holds the port with no host behind it. Stopping the server releases it, and
+    // adb starts a new one the next time it is needed.
+    if (listenFailures_ == 3 && opts_.enableAdb) {
+        logf("port still busy; restarting the adb server");
+        adb_.killServer();
+    }
+    return false;
+}
+
 void Host::acceptLoop() {
     while (running_) {
         detachIfIdle(false);
+        if (!ensureListening()) {
+            Sleep(1000);
+            continue;
+        }
         std::string peer;
         bool loopback = false;
         Socket s = listener_.accept(500, &peer, &loopback);

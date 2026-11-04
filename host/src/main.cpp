@@ -72,6 +72,7 @@ std::wstring errorLine(const std::string& code) {
     if (code == "virtual_display_config_denied") return L"无法写入虚拟显示配置";
     if (code == "virtual_display_layout") return L"无法把虚拟屏设为独立显示器";
     if (code == "no_encoder") return L"没有可用的硬件编码器";
+    if (code == "port_in_use") return L"端口 27183 被其他程序占用，正在重试";
     return widen(code);
 }
 
@@ -80,7 +81,7 @@ std::vector<std::wstring> statusLines() {
     std::vector<std::wstring> out;
     const LiveStatus l = g_host->liveStatus();
     if (!l.connected) {
-        out.push_back(L"未连接手机");
+        out.push_back(l.error.empty() ? L"未连接手机" : errorLine(l.error));
         return out;
     }
     out.push_back(format(L"已连接：%s · %s", widen(l.device).c_str(), l.transport == "wifi" ? L"Wi-Fi" : L"USB"));

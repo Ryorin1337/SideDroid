@@ -48,6 +48,16 @@ void netInit() {
 #endif
 }
 
+// A socket a child process inherits outlives this process: a long-running child such
+// as the adb server would keep the port bound after we exit.
+static void keepFromChildren(unsigned long long fd) {
+#ifdef _WIN32
+    SetHandleInformation(reinterpret_cast<HANDLE>(fd), HANDLE_FLAG_INHERIT, 0);
+#else
+    fcntl(static_cast<int>(fd), F_SETFD, FD_CLOEXEC);
+#endif
+}
+
 static bool waitReadable(unsigned long long fd, int timeoutMs) {
 #ifdef _WIN32
     WSAPOLLFD p{static_cast<SOCKET>(fd), POLLRDNORM, 0};
@@ -82,6 +92,7 @@ Socket Socket::tcpConnect(const std::string& host, uint16_t port, int timeoutMs)
         freeaddrinfo(res);
         return {};
     }
+    keepFromChildren(fd);
     Socket s(fd);
 
     // Non-blocking connect so that the timeout is honored.
@@ -121,6 +132,7 @@ Socket Socket::tcpListen(uint16_t port, bool loopbackOnly) {
     netInit();
     Fd fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == kInvalid) return {};
+    keepFromChildren(fd);
     Socket s(fd);
 #ifndef _WIN32
     int yes = 1;
@@ -139,6 +151,7 @@ Socket Socket::udpBind(uint16_t port) {
     netInit();
     Fd fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd == kInvalid) return {};
+    keepFromChildren(fd);
     Socket s(fd);
     sockaddr_in a{};
     a.sin_family = AF_INET;
@@ -154,6 +167,7 @@ Socket Socket::accept(int timeoutMs, std::string* peerIp, bool* isLoopback) {
     socklen_t len = sizeof(a);
     Fd c = ::accept(fd_, reinterpret_cast<sockaddr*>(&a), &len);
     if (c == kInvalid) return {};
+    keepFromChildren(c);
     if (peerIp) {
         char buf[64]{};
         inet_ntop(AF_INET, &a.sin_addr, buf, sizeof(buf));

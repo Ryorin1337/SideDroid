@@ -82,7 +82,7 @@ fun main(args: Array<String>) {
         render(out, "console-pairing", 460, 860, dark) { Console(HostStatus(reachable = true, pairingCode = "K7QM-2XPD", pairingSeconds = 94)) }
 
         val hosts = listOf(
-            DiscoveredHost("RYAN-LAPTOP", "192.168.1.23", 27183, true),
+            DiscoveredHost("MY-LAPTOP", "192.168.1.23", 27183, true),
             DiscoveredHost("OFFICE-PC", "192.168.1.40", 27183, false),
         )
         // Phone portrait and landscape, a foldable, and tablets both ways.
@@ -113,9 +113,18 @@ fun main(args: Array<String>) {
         render(out, "phone-pair", 400, 860, dark) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
                 PhoneHomeScreen(PhoneHomeState(hosts = hosts), {}, {}, {})
-                PairingDialog("RYAN-LAPTOP", wrongCode = true, {}, {})
+                PairingDialog("MY-LAPTOP", wrongCode = true, {}, {})
             }
         }
+        render(out, "console-service-stopped", 460, 860, dark) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TitleRow({}, {}, {})
+                    ConsoleScreen(HostStatus(), ConsoleActions(), serviceStopped = true)
+                }
+            }
+        }
+        render(out, "console-port-busy", 460, 860, dark) { Console(HostStatus(reachable = true, error = "port_in_use")) }
         render(out, "console-about", 460, 860, dark) {
             Console(connected)
             AboutDialog(onDismiss = {})

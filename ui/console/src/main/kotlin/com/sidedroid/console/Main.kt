@@ -93,9 +93,13 @@ private fun runConsole(args: Array<String>, instance: String?, single: SingleIns
         val scope = rememberCoroutineScope()
         var aboutOpen by remember { mutableStateOf(false) }
 
+        var serviceStopped by remember { mutableStateOf(false) }
+        var unreachableSeconds by remember { mutableStateOf(0) }
         LaunchedEffect(Unit) {
             while (true) {
                 status = withContext(Dispatchers.IO) { client.status() }
+                serviceStopped = client.serviceStopped
+                unreachableSeconds = if (status.reachable) 0 else unreachableSeconds + 1
                 delay(1000)
             }
         }
@@ -145,7 +149,11 @@ private fun runConsole(args: Array<String>, instance: String?, single: SingleIns
                             onStartPairing = { act { client.startPairing() } },
                             onCancelPairing = { act { client.cancelPairing() } },
                             onUnpair = { id -> act { client.unpair(id) } },
+                            onStartService = { act { client.startHost() } },
                         ),
+                        serviceStopped = serviceStopped,
+                        // A host takes well under a second to start. This long means it will not.
+                        startupFailed = unreachableSeconds >= 10,
                     )
                 }
             }

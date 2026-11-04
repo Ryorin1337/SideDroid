@@ -11,7 +11,7 @@ namespace sd {
 
 using Bytes = std::vector<uint8_t>;
 
-constexpr uint16_t kProtocolVersion = 3;
+constexpr uint16_t kProtocolVersion = 1;
 constexpr uint16_t kDefaultPort = 27183;
 
 class Writer {

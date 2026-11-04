@@ -12,3 +12,15 @@ local.properties
 captures/
 .DS_Store
 .cxx/
+
+# Internal test scripts and working notes
+scripts/stream_tests.ps1
+scripts/single_instance_test.ps1
+scripts/display_mode_test.ps1
+scripts/display_diag.ps1
+scripts/console_self_check.ps1
+scripts/ipc_test.ps1
+scripts/verify_artifacts.ps1
+scripts/restart_test.ps1
+docs/STATUS.md
+docs/ACCEPTANCE.md
