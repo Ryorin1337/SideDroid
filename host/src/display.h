@@ -17,7 +17,8 @@ struct OutputInfo {
     bool attached = false;     // part of the desktop
     bool primary = false;
     RECT rect{};
-    bool isVdd = false;
+    bool isVdd = false;        // the virtual display and nothing else
+    bool isVddShared = false;  // in a clone group with a real display: never change its mode
 };
 
 std::vector<OutputInfo> listOutputs();
@@ -33,8 +34,6 @@ bool outputHasMode(const std::wstring& deviceName, const DisplayMode& m);
 
 // Puts the output on the desktop, right of the existing displays, in mode m.
 bool attachOutput(const std::wstring& deviceName, const DisplayMode& m);
-// Takes the output off the desktop, so windows return to the real displays.
-bool detachOutput(const std::wstring& deviceName);
 
 // Picks what to request from Windows for this device.
 //   manual non-zero fields win; otherwise native size and the fastest rate.

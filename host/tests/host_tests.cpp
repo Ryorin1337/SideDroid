@@ -6,6 +6,7 @@
 #include "display.h"
 #include "input.h"
 #include "ipc.h"
+#include "topology.h"
 
 using namespace sd;
 
@@ -17,6 +18,14 @@ static int g_failures = 0;
             ++g_failures;                                            \
         }                                                            \
     } while (0)
+
+static void testRefusesRealDisplay() {
+    // Whatever the layout, a display with a real monitor on it is never "the virtual display".
+    for (const auto& o : listOutputs()) {
+        if (o.isVdd) CHECK(!o.primary || !o.isVddShared);
+        CHECK(!(o.isVdd && o.isVddShared));
+    }
+}
 
 static void testVddIdentity() {
     CHECK(isVddMonitorId(L"\\\\?\\DISPLAY#MTT1337#5&abc&0&UID256#{e6f07b5f}"));
@@ -138,6 +147,60 @@ static void testTouchDevice() {
     CHECK(t.available());
 }
 
+// A clone group as Windows reports it: laptop panel and virtual display share
+// source mode 0, each with a target mode of its own. An external display follows.
+static DisplayLayout cloneLayout() {
+    DisplayLayout l;
+    l.modes.resize(5);
+    for (UINT32 i = 0; i < 5; ++i) l.modes[i].id = 100 + i;
+    DISPLAYCONFIG_PATH_INFO panel{}, vdd{}, external{};
+    panel.targetInfo.id = 1;
+    panel.sourceInfo.modeInfoIdx = 0;
+    panel.targetInfo.modeInfoIdx = 1;
+    vdd.targetInfo.id = 2;
+    vdd.sourceInfo.modeInfoIdx = 0;
+    vdd.targetInfo.modeInfoIdx = 2;
+    external.targetInfo.id = 3;
+    external.sourceInfo.modeInfoIdx = 3;
+    external.targetInfo.modeInfoIdx = 4;
+    l.paths = {panel, vdd, external};
+    return l;
+}
+
+static void testLayoutEdit() {
+    auto isVdd = [](const DISPLAYCONFIG_PATH_INFO& p) { return p.targetInfo.id == 2; };
+    auto out = layoutWithout(cloneLayout(), isVdd);
+    CHECK(out.paths.size() == 2);
+    // The virtual display's own mode is gone and the source mode it shared stays.
+    CHECK(out.modes.size() == 4);
+    for (const auto& p : out.paths) {
+        CHECK(p.targetInfo.id != 2);
+        CHECK(p.sourceInfo.modeInfoIdx < out.modes.size());
+        CHECK(p.targetInfo.modeInfoIdx < out.modes.size());
+    }
+    // References still lead to the same modes after renumbering.
+    CHECK(out.modes[out.paths[0].sourceInfo.modeInfoIdx].id == 100);
+    CHECK(out.modes[out.paths[0].targetInfo.modeInfoIdx].id == 101);
+    CHECK(out.modes[out.paths[1].sourceInfo.modeInfoIdx].id == 103);
+    CHECK(out.modes[out.paths[1].targetInfo.modeInfoIdx].id == 104);
+
+    // An invalid index stays invalid.
+    auto l = cloneLayout();
+    l.paths[0].targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+    out = layoutWithout(l, isVdd);
+    CHECK(out.paths[0].targetInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID);
+
+    // Saved layouts come back intact, and damaged files are refused.
+    auto src = cloneLayout();
+    DisplayLayout back;
+    auto bytes = serializeLayout(src);
+    CHECK(deserializeLayout(bytes, back));
+    CHECK(back.paths.size() == 3 && back.modes.size() == 5 && back.modes[4].id == 104 && back.paths[2].targetInfo.id == 3);
+    CHECK(!deserializeLayout(bytes.substr(0, bytes.size() - 1), back));
+    CHECK(!deserializeLayout("", back));
+    CHECK(!deserializeLayout(std::string(64, 'x'), back));
+}
+
 static void testAdb() {
     auto d = parseAdbDevices(
         "* daemon not running; starting now at tcp:5037\r\n"
@@ -165,10 +228,12 @@ static void testJson() {
 
 int main() {
     testVddIdentity();
+    testRefusesRealDisplay();
     testChooseMode();
     testVddXml();
     testTouchMap();
     testTouchDevice();
+    testLayoutEdit();
     testAdb();
     testJson();
     if (g_failures) {

@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "log.h"
+#include "topology.h"
 
 namespace sd {
 
@@ -27,13 +28,18 @@ std::vector<OutputInfo> listOutputs() {
 
         DISPLAY_DEVICEW mon{};
         mon.cb = sizeof(mon);
-        bool anyMonitor = false;
+        bool anyMonitor = false, hasVdd = false, hasOther = false;
         for (DWORD m = 0; EnumDisplayDevicesW(ad.DeviceName, m, &mon, EDD_GET_DEVICE_INTERFACE_NAME); ++m) {
             anyMonitor = true;
-            if (isVddMonitorId(mon.DeviceID)) o.isVdd = true;
+            if (isVddMonitorId(mon.DeviceID)) hasVdd = true;
+            else hasOther = true;
             if (o.monitorId.empty()) o.monitorId = mon.DeviceID;
         }
         if (!anyMonitor) continue;  // adapter output with nothing behind it
+        // In a clone group one output carries several monitors. Changing its mode
+        // would change the real display's resolution as well.
+        o.isVdd = hasVdd && !hasOther;
+        o.isVddShared = hasVdd && hasOther;
 
         if (o.attached) {
             DEVMODEW dm{};
@@ -80,6 +86,10 @@ bool outputHasMode(const std::wstring& deviceName, const DisplayMode& m) {
 }
 
 bool attachOutput(const std::wstring& deviceName, const DisplayMode& m) {
+    if (auto o = findOutputByName(deviceName); o && !o->isVdd) {
+        logf("refusing to change the mode of %s: it is not only the virtual display", narrow(deviceName).c_str());
+        return false;
+    }
     // A pipeline rebuild for bitrate reasons asks for the mode it already has.
     // Setting it again would make the whole desktop flicker.
     if (auto o = findOutputByName(deviceName); o && o->attached) {
@@ -108,19 +118,6 @@ bool attachOutput(const std::wstring& deviceName, const DisplayMode& m) {
     if (r == DISP_CHANGE_SUCCESSFUL) r = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
     if (r != DISP_CHANGE_SUCCESSFUL) {
         logf("attachOutput %s %dx%d@%d failed: %ld", narrow(deviceName).c_str(), m.width, m.height, m.hz, r);
-        return false;
-    }
-    return true;
-}
-
-bool detachOutput(const std::wstring& deviceName) {
-    DEVMODEW dm{};
-    dm.dmSize = sizeof(dm);
-    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
-    LONG r = ChangeDisplaySettingsExW(deviceName.c_str(), &dm, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-    if (r == DISP_CHANGE_SUCCESSFUL) r = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-    if (r != DISP_CHANGE_SUCCESSFUL) {
-        logf("detachOutput %s failed: %ld", narrow(deviceName).c_str(), r);
         return false;
     }
     return true;
@@ -292,6 +289,6 @@ bool vddCommand(const std::wstring& command) {
     return false;
 }
 
-bool vddInstalled() { return findVddOutput().has_value(); }
+bool vddInstalled() { return vddMonitorPresent(); }
 
 }  // namespace sd

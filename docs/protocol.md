@@ -51,12 +51,12 @@ H -> C: confirmHost(32)
 | 类型 | 方向 | 内容 |
 |---|---|---|
 | 1 Hello | C→H | 协议版本、设备名、屏幕尺寸、DPI、解码能力、刷新率列表、是否要 UDP |
-| 2 Config | H→C | 显示尺寸、编码尺寸、帧率、编码格式、码率。之后的第一帧是关键帧 |
+| 2 Config | H→C | 显示尺寸、编码尺寸、帧率、编码格式、码率、是否镜像、用户的手动设置。之后的第一帧是关键帧 |
 | 3 Frame | H→C | 帧号、采集时间、是否关键帧、Annex B 码流 |
 | 4 Stats | C→H | 约每 100ms：字节数、帧数、收包数、丢包数、丢帧数、延迟变化、解码耗时、RTT |
 | 5 Touch | C→H | 多点触控，坐标为 0..65535 的归一化值 |
 | 6 KeyframeRequest | C→H | 请求关键帧 |
-| 7 SetDisplay | C→H | 手动设置分辨率、刷新率、码率上限，0 表示自动 |
+| 7 SetDisplay | C→H | 手动设置分辨率、刷新率、码率上限（0 表示自动），以及副屏或镜像 |
 | 8/9 Ping/Pong | 双向 | 测 RTT |
 | 10 Nack | C→H | 请求重传指定分片 |
 | 11 UdpSetup | H→C | Host 的 UDP 端口 |
@@ -83,6 +83,15 @@ H -> C: confirmHost(32)
 
 **恢复：** 按相反顺序。码率每秒约上升 5%，并且只在实际用量超过目标一半时才上升，空闲桌面不算证据。
 
+## 显示布局
+
+通过 Windows CCD API（`QueryDisplayConfig` / `SetDisplayConfig`）管理，实现在 `host/src/topology.cpp`。
+
+- **副屏：** 连接时先保存当前布局，再把虚拟屏放到独立的 source 上。Windows 可能把新显示器放进复制组，那时它和主屏共用一个 source，改模式会同时改到主屏，所以 Host 拒绝修改任何含有真实显示器的输出。
+- **镜像：** 不使用 Windows 的复制模式，直接采集主屏，虚拟屏不上桌面，主屏的任何设置都不变。
+- **恢复：** 手机离开 5 秒后恢复保存的布局，短暂掉线不会让窗口跳来跳去。布局同时写入 `%LOCALAPPDATA%\SideDroid\display-layout-to-restore.bin`，程序崩溃或断电后，下次启动时恢复。
+- **开机：** 驱动的显示器开机就会出现，由 SideDroid 安装驱动时，Host 启动会把它从桌面取下。
+
 ## 控制台管道
 
 `\\.\pipe\SideDroidHost` 每行一个 JSON，权限只开放给当前用户，并拒绝远程连接。
@@ -90,7 +99,7 @@ H -> C: confirmHost(32)
 | cmd | 参数 |
 |---|---|
 | `status` | 无 |
-| `set` | `width` `height` `hz` `maxKbps` `allowWireless` |
+| `set` | `width` `height` `hz` `maxKbps` `allowWireless` `mirror` |
 | `pair_start` / `pair_cancel` | 无 |
 | `unpair` | `id` |
 | `disconnect` | 无 |

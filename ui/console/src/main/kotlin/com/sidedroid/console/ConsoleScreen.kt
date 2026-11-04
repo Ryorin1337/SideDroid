@@ -44,6 +44,7 @@ data class ConsoleActions(
     val onUnpair: (String) -> Unit = {},
 )
 
+private val DisplayModes = listOf(Choice("副屏", false), Choice("镜像", true))
 private val Resolutions = listOf(
     Choice("自适应", 0 to 0),
     Choice("1080p", 1920 to 1080),
@@ -56,6 +57,7 @@ private val Bitrates = listOf(Choice("自适应", 0), Choice("省流", 10_000), 
 private fun errorText(code: String) = when (code) {
     "virtual_display_missing" -> "未找到虚拟显示驱动"
     "virtual_display_config_denied" -> "无法写入虚拟显示配置，已使用最接近的分辨率"
+    "virtual_display_layout" -> "无法把虚拟屏设为独立显示器"
     "no_encoder" -> "没有找到可用的硬件编码器"
     else -> code
 }
@@ -110,7 +112,9 @@ fun ConsoleScreen(status: HostStatus, actions: ConsoleActions, modifier: Modifie
 
         val set = status.settings
         SectionCard {
-            ChoiceRow("分辨率", Resolutions, set.width to set.height, { (w, h) -> actions.onSetDisplay(set.copy(width = w, height = h)) }, enabled = status.reachable)
+            ChoiceRow("模式", DisplayModes, set.mirror, { actions.onSetDisplay(set.copy(mirror = it)) }, enabled = status.reachable)
+            // Mirroring always shows the main display at its own resolution.
+            ChoiceRow("分辨率", Resolutions, set.width to set.height, { (w, h) -> actions.onSetDisplay(set.copy(width = w, height = h)) }, enabled = status.reachable && !set.mirror)
             ChoiceRow("刷新率", Rates, set.hz, { actions.onSetDisplay(set.copy(hz = it)) }, enabled = status.reachable)
             ChoiceRow("画质", Bitrates, set.maxKbps, { actions.onSetDisplay(set.copy(maxKbps = it)) }, enabled = status.reachable)
         }

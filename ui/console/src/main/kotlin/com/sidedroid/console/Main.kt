@@ -105,7 +105,7 @@ fun main(args: Array<String>) = application {
                     ConsoleScreen(
                         status,
                         ConsoleActions(
-                            onSetDisplay = { s -> act { client.setDisplay(s.width, s.height, s.hz, s.maxKbps, s.allowWireless) } },
+                            onSetDisplay = { s -> act { client.setDisplay(s.width, s.height, s.hz, s.maxKbps, s.allowWireless, s.mirror) } },
                             onDisconnect = { act { client.disconnect() } },
                             onInstallDriver = { act { client.installDriver() } },
                             onStartPairing = { act { client.startPairing() } },

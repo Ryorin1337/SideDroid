@@ -4,7 +4,8 @@
 namespace sd {
 
 // printf-style. Written to %LOCALAPPDATA%\SideDroid\host.log and to stderr.
-void logInit(bool toStderr);
+// fileName is relative to dataDir().
+void logInit(bool toStderr, const std::wstring& fileName = L"host.log");
 void logf(const char* fmt, ...);
 
 std::string narrow(const std::wstring& w);

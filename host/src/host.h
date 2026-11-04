@@ -19,6 +19,7 @@
 #include "sidedroid/ratecontrol.h"
 #include "sidedroid/secure.h"
 #include "store.h"
+#include "topology.h"
 
 namespace sd {
 
@@ -32,9 +33,22 @@ struct HostOptions {
     bool enableDiscovery = true;
     bool enableTouch = true;
     bool testPattern = false;  // overlay moving noise on the capture, for bitrate tests
+    bool useVirtualDisplayInTest = false;  // full display handling on a test port
 };
 
 class Session;
+
+struct LiveStatus {
+    bool connected = false;
+    std::string device, transport, encoder, codec, adapter, error;
+    int displayW = 0, displayH = 0, hz = 0, encodeW = 0, encodeH = 0, fps = 0;
+    uint32_t kbps = 0, measuredKbps = 0, rttMs = 0, decodeMs = 0;
+    double lossPercent = 0;
+    uint32_t framesDropped = 0;
+    double encodeMs = 0, measuredFps = 0;
+    bool usingVirtualDisplay = false;
+    std::string sourceName;
+};
 
 class Host {
 public:
@@ -47,8 +61,15 @@ public:
     const HostOptions& options() const { return opts_; }
 
     // For Session.
-    void publishStatus(const std::function<void(struct LiveStatus&)>& edit);
-    void markOutputAttached(const std::wstring& device);
+    void publishStatus(const std::function<void(LiveStatus&)>& edit);
+    // Remembers the current layout, once, before the first change to it.
+    bool saveLayoutBeforeChange();
+    // Puts the saved layout back right away, for switching to mirroring.
+    void restoreLayoutNow();
+    LiveStatus liveStatus();
+    void applySettings(const Settings& s);
+    void disconnectPhone();
+    std::string startPairing();
     Settings currentSettings() { return store_.settings(); }
     // True when SideDroid installed the driver, so the display is ours to manage.
     bool ownsDriver() const { return ownsDriver_; }
@@ -57,6 +78,7 @@ private:
     void acceptLoop();
     std::string statusJson();
     void detachIfIdle(bool force);
+    void recoverLayoutAtStart();
     std::optional<std::string> takePairingCodeAttempt();
 
     HostOptions opts_;
@@ -81,24 +103,14 @@ private:
     std::string lastPairedName_;
 
     std::mutex statusMutex_;
-    std::unique_ptr<struct LiveStatus> live_;
+    std::unique_ptr<LiveStatus> live_;
 
     // Virtual display attached by us and waiting to be taken off the desktop.
     std::mutex attachMutex_;
-    std::wstring attachedOutput_;
+    bool layoutSaved_ = false;
+    DisplayLayout savedLayout_;
     uint64_t detachAtUs_ = 0;
 };
 
-struct LiveStatus {
-    bool connected = false;
-    std::string device, transport, encoder, codec, adapter, error;
-    int displayW = 0, displayH = 0, hz = 0, encodeW = 0, encodeH = 0, fps = 0;
-    uint32_t kbps = 0, measuredKbps = 0, rttMs = 0, decodeMs = 0;
-    double lossPercent = 0;
-    uint32_t framesDropped = 0;
-    double encodeMs = 0, measuredFps = 0;
-    bool usingVirtualDisplay = false;
-    std::string sourceName;
-};
 
 }  // namespace sd

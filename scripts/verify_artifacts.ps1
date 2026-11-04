@@ -1,5 +1,5 @@
 # Read-only checks of what package.ps1 produced. Installs nothing.
-param([string]$Version = '0.1.0')
+param([string]$Version = '0.2.0')
 $root = Resolve-Path "$PSScriptRoot\.."
 $failed = 0
 function Check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:failed++ } }

@@ -42,11 +42,11 @@ std::wstring dataDir() {
     return dir;
 }
 
-void logInit(bool toStderr) {
+void logInit(bool toStderr, const std::wstring& fileName) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_stderr = toStderr;
     if (!g_file) {
-        auto path = dataDir() + L"\\host.log";
+        auto path = dataDir() + L"\\" + fileName;
         // Keep one previous log: enough for a bug report, and the size stays bounded.
         auto old = path + L".1";
         MoveFileExW(path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);

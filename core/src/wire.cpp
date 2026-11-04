@@ -52,6 +52,10 @@ Bytes encode(const Config& m) {
     w.u16(m.fps);
     w.u8(m.codec);
     w.u32(m.bitrateKbps);
+    w.u8(m.mirror ? 1 : 0);
+    w.u16(m.manualWidth);
+    w.u16(m.manualHeight);
+    w.u16(m.manualHz);
     return b;
 }
 
@@ -64,6 +68,10 @@ std::optional<Config> decodeConfig(Reader r) {
     m.fps = r.u16();
     m.codec = r.u8();
     m.bitrateKbps = r.u32();
+    m.mirror = r.u8() != 0;
+    m.manualWidth = r.u16();
+    m.manualHeight = r.u16();
+    m.manualHz = r.u16();
     if (!r.ok()) return std::nullopt;
     return m;
 }
@@ -158,6 +166,7 @@ Bytes encode(const SetDisplay& m) {
     w.u16(m.height);
     w.u16(m.hz);
     w.u32(m.maxBitrateKbps);
+    w.u8(m.mirror);
     return b;
 }
 
@@ -167,7 +176,8 @@ std::optional<SetDisplay> decodeSetDisplay(Reader r) {
     m.height = r.u16();
     m.hz = r.u16();
     m.maxBitrateKbps = r.u32();
-    if (!r.ok()) return std::nullopt;
+    m.mirror = r.u8();
+    if (!r.ok() || m.mirror > kMirrorKeep) return std::nullopt;
     return m;
 }
 

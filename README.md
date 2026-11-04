@@ -44,6 +44,7 @@
 ctest --test-dir build -C Release   # 协议和 Host 逻辑
 .\scripts\stream_tests.ps1          # 端到端串流、丢包和限速，不需要手机
 .\scripts\console_self_check.ps1    # 打包后的控制台能否启动并连上 Host
+.\scripts\display_mode_test.ps1     # 真实驱动上的副屏、镜像和恢复，屏幕会短暂重排
 cd ui\console; .\gradlew.bat test renderScreens   # 控制台测试，把所有界面渲染成 PNG
 ```
 

@@ -1,6 +1,7 @@
 set(HOST_COMMON
     src/log.cpp
     src/display.cpp
+    src/topology.cpp
     src/capture.cpp
     src/encoder_nvenc.cpp
     src/encoder_mf.cpp

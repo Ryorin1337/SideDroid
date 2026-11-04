@@ -22,6 +22,7 @@ struct Settings {
     uint16_t hz = 0;      // 0 = fastest the phone supports
     uint32_t maxKbps = 0; // 0 = automatic
     bool allowWireless = true;
+    bool mirror = false;  // show the main display instead of an extended one
 };
 
 class Store {

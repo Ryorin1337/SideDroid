@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     uint16_t w = 1920, h = 1080;
     uint8_t codecs = kCodecHevc | kCodecH264;
     bool requestKey = false;
+    int mirrorAt = -1, extendAt = -1;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
@@ -43,6 +44,8 @@ int main(int argc, char** argv) {
         else if (a == "--size") { w = static_cast<uint16_t>(atoi(next())); h = static_cast<uint16_t>(atoi(next())); }
         else if (a == "--h264") codecs = kCodecH264;
         else if (a == "--request-key") requestKey = true;
+        else if (a == "--mirror-at") mirrorAt = atoi(next());
+        else if (a == "--extend-at") extendAt = atoi(next());
     }
 
     FILE* out = outPath.empty() ? nullptr : fopen(outPath.c_str(), "wb");
@@ -74,8 +77,8 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(m);
         lastCfg = c;
         configs.fetch_add(1);
-        printf("config: display %dx%d encode %dx%d @%d codec=%s %u kbps\n", c.displayWidth, c.displayHeight,
-               c.encodeWidth, c.encodeHeight, c.fps, c.codec == kCodecHevc ? "HEVC" : "H.264", c.bitrateKbps);
+        printf("config: display %dx%d encode %dx%d @%d codec=%s %u kbps mirror=%d\n", c.displayWidth, c.displayHeight,
+               c.encodeWidth, c.encodeHeight, c.fps, c.codec == kCodecHevc ? "HEVC" : "H.264", c.bitrateKbps, c.mirror ? 1 : 0);
         fflush(stdout);
     };
     cb.onFrame = [&](const FrameHeader& fh, const uint8_t* d, size_t n) {
@@ -105,6 +108,8 @@ int main(int argc, char** argv) {
         uint64_t b = secondBytes.exchange(0);
         kbpsPerSecond.push_back(b * 8 / 1000);
         if (requestKey && s == seconds / 2) client.requestKeyframe();
+        if (s == mirrorAt) client.sendSetDisplay(SetDisplay{0, 0, 0, kKeepBitrate, kMirrorOn});
+        if (s == extendAt) client.sendSetDisplay(SetDisplay{0, 0, 0, kKeepBitrate, kMirrorOff});
         printf("t=%2ds %6llu kbps frames=%llu rtt=%uus\n", s + 1, static_cast<unsigned long long>(b * 8 / 1000),
                static_cast<unsigned long long>(frames.load()), client.lastRttUs());
         fflush(stdout);

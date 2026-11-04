@@ -211,16 +211,40 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
     DisplayMode want = chooseMode(hello_, viewportW_.load(), viewportH_.load(), manual);
     *mode = want;
 
-    if (!opts.sourceOverride.empty()) {
+    if (!opts.sourceOverride.empty() && !opts.useVirtualDisplayInTest) {
         *device = opts.sourceOverride;
         *isVirtual = false;
         return true;
     }
 
-    auto vdd = findVddOutput();
-    if (!vdd) {
+    if (s.mirror) {
+        // Mirroring reads the main display as it is, so nothing about it changes.
+        host_.restoreLayoutNow();
+        for (const auto& o : listOutputs()) {
+            if (o.primary) {
+                *device = o.deviceName;
+                *isVirtual = false;
+                return true;
+            }
+        }
+        logf("no primary display found");
+        return false;
+    }
+
+    if (!vddMonitorPresent()) {
         host_.publishStatus([](LiveStatus& l) { l.error = "virtual_display_missing"; });
         logf("virtual display driver not found");
+        return false;
+    }
+    if (!host_.saveLayoutBeforeChange()) return false;
+    const std::wstring isolated = isolateVdd();
+    if (isolated.empty()) {
+        host_.publishStatus([](LiveStatus& l) { l.error = "virtual_display_layout"; });
+        return false;
+    }
+    auto vdd = findOutputByName(isolated);
+    if (!vdd || !vdd->isVdd) {
+        logf("virtual display source %s not usable yet", narrow(isolated).c_str());
         return false;
     }
     *device = vdd->deviceName;
@@ -259,12 +283,7 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
             *mode = *best;
         }
     }
-    // A display the user already had on the desktop, from their own VDD install,
-    // stays there when the phone leaves. Otherwise it was only ever here for us.
-    const bool wasAttached = vdd->attached;
-    if (!attachOutput(*device, *mode)) return false;
-    if (!wasAttached || host_.ownsDriver()) host_.markOutputAttached(*device);
-    return true;
+    return attachOutput(*device, *mode);
 }
 
 // Noise tiles moving over the picture: hard to compress and independent of what
@@ -345,8 +364,17 @@ void Session::videoLoop() {
 
         // Inner loop runs until something forces a rebuild of the pipeline.
         const int scale = startTarget.scalePercent;
-        const int encW = std::max(320, capW * scale / 100) & ~1;
-        const int encH = std::max(240, capH * scale / 100) & ~1;
+        // Mirroring can mean a desktop larger than the phone's decoder accepts.
+        double fit = 1.0;
+        {
+            const int longer = std::max(capW, capH), shorter = std::min(capW, capH);
+            const int maxLong = std::max(hello_.maxDecodeWidth, hello_.maxDecodeHeight);
+            const int maxShort = std::min(hello_.maxDecodeWidth, hello_.maxDecodeHeight);
+            if (maxLong > 0 && maxShort > 0)
+                fit = std::min({1.0, static_cast<double>(maxLong) / longer, static_cast<double>(maxShort) / shorter});
+        }
+        const int encW = std::max(320, static_cast<int>(capW * fit) * scale / 100) & ~1;
+        const int encH = std::max(240, static_cast<int>(capH * fit) * scale / 100) & ~1;
         const int fps = startTarget.fps;
 
         uint8_t codec = (hello_.codecs & kCodecHevc) ? kCodecHevc : kCodecH264;
@@ -416,6 +444,13 @@ void Session::videoLoop() {
         cfg.fps = static_cast<uint16_t>(fps);
         cfg.codec = codec;
         cfg.bitrateKbps = startTarget.bitrateKbps;
+        {
+            const auto s = host_.currentSettings();
+            cfg.mirror = s.mirror;
+            cfg.manualWidth = s.width;
+            cfg.manualHeight = s.height;
+            cfg.manualHz = s.hz;
+        }
         if (!channel_->send(encode(cfg))) { requestStop(); return; }
         keyRequested_ = true;
 
@@ -581,7 +616,8 @@ void Session::recvLoop() {
                 s.width = d->width;
                 s.height = d->height;
                 s.hz = d->hz;
-                s.maxKbps = d->maxBitrateKbps;
+                if (d->maxBitrateKbps != kKeepBitrate) s.maxKbps = d->maxBitrateKbps;
+                if (d->mirror != kMirrorKeep) s.mirror = d->mirror == kMirrorOn;
                 host_.store().setSettings(s);
                 displayDirty_ = true;
             }
@@ -688,17 +724,70 @@ void Host::publishStatus(const std::function<void(LiveStatus&)>& edit) {
     edit(*live_);
 }
 
-void Host::markOutputAttached(const std::wstring& device) {
+static std::wstring layoutFilePath() { return dataDir() + L"\\display-layout-to-restore.bin"; }
+
+bool Host::saveLayoutBeforeChange() {
     std::lock_guard<std::mutex> lock(attachMutex_);
-    attachedOutput_ = device;
     detachAtUs_ = 0;
+    if (layoutSaved_) return true;
+    DisplayLayout layout;
+    // A user who runs the driver on their own keeps it on the desktop afterwards.
+    if (!(ownsDriver_ ? queryLayoutWithoutVdd(layout) : queryActiveLayout(layout))) return false;
+    if (layout.paths.empty()) {
+        logf("no display besides the virtual one is active; not changing the layout");
+        return false;
+    }
+    savedLayout_ = layout;
+    layoutSaved_ = true;
+    // On disk too: a crash or power loss must not leave the desktop rearranged.
+    const std::string data = serializeLayout(layout);
+    FILE* f = _wfopen(layoutFilePath().c_str(), L"wb");
+    if (f) {
+        fwrite(data.data(), 1, data.size(), f);
+        fclose(f);
+    }
+    return true;
+}
+
+void Host::restoreLayoutNow() {
+    std::lock_guard<std::mutex> lock(attachMutex_);
+    detachAtUs_ = 0;
+    if (!layoutSaved_) return;
+    if (applyLayout(savedLayout_, ownsDriver_)) logf("display layout restored");
+    layoutSaved_ = false;
+    DeleteFileW(layoutFilePath().c_str());
+}
+
+void Host::recoverLayoutAtStart() {
+    if (!opts_.sourceOverride.empty() && !opts_.useVirtualDisplayInTest) return;
+    FILE* f = _wfopen(layoutFilePath().c_str(), L"rb");
+    if (f) {
+        std::string data;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
+        fclose(f);
+        DisplayLayout layout;
+        if (deserializeLayout(data, layout)) {
+            logf("restoring the display layout left by an earlier run");
+            applyLayout(layout, ownsDriver_);
+        }
+        DeleteFileW(layoutFilePath().c_str());
+        return;
+    }
+    // The driver's monitor appears at boot, and Windows may clone it onto the real
+    // display. With no phone connected it has no business being on the desktop.
+    if (ownsDriver_ && vddOnDesktop()) {
+        DisplayLayout layout;
+        if (queryLayoutWithoutVdd(layout) && !layout.paths.empty() && applyLayout(layout, true))
+            logf("virtual display taken off the desktop at start");
+    }
 }
 
 void Host::detachIfIdle(bool force) {
-    std::wstring device;
     {
         std::lock_guard<std::mutex> lock(attachMutex_);
-        if (attachedOutput_.empty()) return;
+        if (!layoutSaved_) return;
         if (sessionActive_.load() && !force) {
             detachAtUs_ = 0;
             return;
@@ -711,12 +800,8 @@ void Host::detachIfIdle(bool force) {
             }
             if (now < detachAtUs_) return;
         }
-        device = attachedOutput_;
-        attachedOutput_.clear();
-        detachAtUs_ = 0;
     }
-    detachOutput(device);
-    logf("virtual display taken off the desktop");
+    restoreLayoutNow();
 }
 
 bool Host::start() {
@@ -725,11 +810,7 @@ bool Host::start() {
     // Wireless can be toggled at runtime, so the check happens per connection.
     listener_ = Socket::tcpListen(opts_.port, false);
     ownsDriver_ = GetFileAttributesW(L"C:\\ProgramData\\SideDroid\\driver-installed-by-sidedroid") != INVALID_FILE_ATTRIBUTES;
-    if (ownsDriver_ && opts_.sourceOverride.empty()) {
-        // The driver creates its monitor at boot. With no phone connected it must
-        // not stay on the desktop, where windows could open on a screen nobody sees.
-        if (auto v = findVddOutput(); v && v->attached) markOutputAttached(v->deviceName);
-    }
+    recoverLayoutAtStart();
     if (!listener_.valid()) {
         logf("cannot listen on port %d", opts_.port);
         return false;
@@ -879,12 +960,14 @@ std::string Host::statusJson() {
       << ",\"rttMs\":" << l.rttMs << ",\"decodeMs\":" << l.decodeMs
       << ",\"encodeMs\":" << l.encodeMs << ",\"measuredFps\":" << l.measuredFps
       << ",\"lossPercent\":" << l.lossPercent << ",\"framesDropped\":" << l.framesDropped
+      << ",\"mirror\":" << (settings.mirror ? "true" : "false")
       << ",\"usingVirtualDisplay\":" << (l.usingVirtualDisplay ? "true" : "false")
       << ",\"virtualDisplayInstalled\":" << (vddInstalled() ? "true" : "false")
       << ",\"adbFound\":" << (adb_.adbFound() ? "true" : "false")
       << ",\"pairingCode\":\"" << code << "\",\"pairingSeconds\":" << codeSeconds
       << ",\"settings\":{\"width\":" << settings.width << ",\"height\":" << settings.height << ",\"hz\":" << settings.hz
-      << ",\"maxKbps\":" << settings.maxKbps << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false") << "}"
+      << ",\"maxKbps\":" << settings.maxKbps << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false")
+      << ",\"mirror\":" << (settings.mirror ? "true" : "false") << "}"
       << ",\"usbDevices\":[";
     bool first = true;
     for (const auto& d : adb_.devices()) {
@@ -903,6 +986,35 @@ std::string Host::statusJson() {
     return o.str();
 }
 
+LiveStatus Host::liveStatus() {
+    std::lock_guard<std::mutex> lock(statusMutex_);
+    return *live_;
+}
+
+void Host::applySettings(const Settings& s) {
+    const bool wasWireless = store_.settings().allowWireless;
+    store_.setSettings(s);
+    if (s.allowWireless != wasWireless && opts_.enableDiscovery) {
+        if (s.allowWireless) discovery_.start(opts_.port);
+        else discovery_.stop();
+    }
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    if (session_) session_->settingsChanged();
+}
+
+void Host::disconnectPhone() {
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    if (session_) session_->requestStop();
+}
+
+std::string Host::startPairing() {
+    std::lock_guard<std::mutex> lock(pairMutex_);
+    pairingCode_ = generatePairingCode();
+    pairingExpiresUs_ = monotonicUs() + kPairingLifetimeUs;
+    pairingAttempts_ = 0;
+    return pairingCode_;
+}
+
 std::string Host::handleCommand(const std::string& json) {
     const std::string cmd = jsonGetString(json, "cmd");
     if (cmd == "status") return statusJson();
@@ -912,23 +1024,13 @@ std::string Host::handleCommand(const std::string& json) {
         s.height = static_cast<uint16_t>(jsonGetNumber(json, "height", s.height));
         s.hz = static_cast<uint16_t>(jsonGetNumber(json, "hz", s.hz));
         s.maxKbps = static_cast<uint32_t>(jsonGetNumber(json, "maxKbps", s.maxKbps));
-        const bool wasWireless = s.allowWireless;
         s.allowWireless = jsonGetBool(json, "allowWireless", s.allowWireless);
-        store_.setSettings(s);
-        if (s.allowWireless != wasWireless) {
-            if (s.allowWireless) discovery_.start(opts_.port);
-            else discovery_.stop();
-        }
-        std::lock_guard<std::mutex> lock(sessionMutex_);
-        if (session_) session_->settingsChanged();
+        s.mirror = jsonGetBool(json, "mirror", s.mirror);
+        applySettings(s);
         return R"({"ok":true})";
     }
     if (cmd == "pair_start") {
-        std::lock_guard<std::mutex> lock(pairMutex_);
-        pairingCode_ = generatePairingCode();
-        pairingExpiresUs_ = monotonicUs() + kPairingLifetimeUs;
-        pairingAttempts_ = 0;
-        return std::string(R"({"ok":true,"code":")") + pairingCode_ + "\"}";
+        return std::string(R"({"ok":true,"code":")") + startPairing() + "\"}";
     }
     if (cmd == "pair_cancel") {
         std::lock_guard<std::mutex> lock(pairMutex_);
@@ -958,8 +1060,7 @@ std::string Host::handleCommand(const std::string& json) {
         return std::string(R"({"ok":)") + (removed ? "true" : "false") + "}";
     }
     if (cmd == "disconnect") {
-        std::lock_guard<std::mutex> lock(sessionMutex_);
-        if (session_) session_->requestStop();
+        disconnectPhone();
         return R"({"ok":true})";
     }
     return R"({"ok":false,"error":"unknown command"})";

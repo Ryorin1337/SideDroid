@@ -19,6 +19,7 @@ data class HostSettings(
     val hz: Int = 0,
     val maxKbps: Int = 0,
     val allowWireless: Boolean = true,
+    val mirror: Boolean = false,
 )
 
 data class PairedDevice(val id: String, val name: String)
@@ -86,7 +87,7 @@ fun parseStatus(line: String): HostStatus {
         adbFound = b("adbFound", true),
         pairingCode = s("pairingCode"),
         pairingSeconds = i("pairingSeconds"),
-        settings = HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", true, set)),
+        settings = HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", true, set), b("mirror", false, set)),
         usbUnauthorized = usb.any { s("state", it) == "unauthorized" },
         usbCount = usb.count { s("state", it) == "device" },
         paired = o["pairedDevices"]?.jsonArray?.map { PairedDevice(s("id", it.jsonObject), s("name", it.jsonObject)) } ?: emptyList(),
@@ -149,7 +150,7 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
 
     fun status(): HostStatus = exchange("""{"cmd":"status"}""")?.let { runCatching { parseStatus(it) }.getOrNull() } ?: HostStatus()
 
-    fun setDisplay(width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean) {
+    fun setDisplay(width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean, mirror: Boolean) {
         val body = buildJsonObject {
             put("cmd", "set")
             put("width", width)
@@ -157,6 +158,7 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
             put("hz", hz)
             put("maxKbps", maxKbps)
             put("allowWireless", allowWireless)
+            put("mirror", mirror)
         }
         exchange(body.toString())
     }

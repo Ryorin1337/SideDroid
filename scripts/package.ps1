@@ -1,7 +1,7 @@
 # Builds the release: host, console, Android APK and the MSI, into out\.
 # Windows parts build here; the APK builds inside WSL, where the Android SDK lives.
 param(
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.2.0',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
     [switch]$SkipApk
 )

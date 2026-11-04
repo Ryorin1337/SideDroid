@@ -9,7 +9,7 @@ object NativeBridge {
 
     /** Callbacks arrive on native threads. */
     interface Listener {
-        fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int)
+        fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int)
         fun onDisconnected(reason: String)
         fun onPaired(secret: ByteArray)
     }
@@ -29,6 +29,6 @@ object NativeBridge {
     external fun setSurface(surface: Surface?)
     external fun sendTouch(data: IntArray, count: Int)
     external fun sendViewport(width: Int, height: Int)
-    external fun sendSetDisplay(width: Int, height: Int, hz: Int, kbps: Int)
+    external fun sendSetDisplay(width: Int, height: Int, hz: Int, mirror: Boolean)
     external fun rttUs(): Int
 }

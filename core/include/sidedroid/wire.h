@@ -11,7 +11,7 @@ namespace sd {
 
 using Bytes = std::vector<uint8_t>;
 
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;
 constexpr uint16_t kDefaultPort = 27183;
 
 class Writer {
@@ -129,6 +129,11 @@ struct Config {
     uint16_t fps = 0;
     uint8_t codec = 0;
     uint32_t bitrateKbps = 0;
+    bool mirror = false;      // showing the main display rather than an extended one
+    // What the user chose, so that the phone's controls show the real state.
+    uint16_t manualWidth = 0;
+    uint16_t manualHeight = 0;
+    uint16_t manualHz = 0;
 };
 
 struct FrameHeader {
@@ -160,12 +165,16 @@ struct TouchPoint {
     uint16_t pressure = 0;  // 0..1024
 };
 
+constexpr uint32_t kKeepBitrate = 0xFFFFFFFF;
+constexpr uint8_t kMirrorOff = 0, kMirrorOn = 1, kMirrorKeep = 2;
+
 // Either side asks for a display mode. width/height 0 means automatic.
 struct SetDisplay {
     uint16_t width = 0;
     uint16_t height = 0;
     uint16_t hz = 0;
-    uint32_t maxBitrateKbps = 0;  // 0 means automatic
+    uint32_t maxBitrateKbps = 0;  // 0 means automatic, kKeepBitrate leaves it alone
+    uint8_t mirror = kMirrorKeep;
 };
 
 // Client -> host: orientation or window size changed.

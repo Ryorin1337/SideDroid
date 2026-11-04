@@ -76,12 +76,15 @@ class MainActivity : ComponentActivity() {
     private var config by mutableStateOf<StreamConfig?>(null)
     private var usedUsb by mutableStateOf(true)
 
-    private data class StreamConfig(val displayW: Int, val displayH: Int, val encodeW: Int, val encodeH: Int, val fps: Int, val kbps: Int)
+    private data class StreamConfig(
+        val displayW: Int, val displayH: Int, val encodeW: Int, val encodeH: Int, val fps: Int, val kbps: Int,
+        val mirror: Boolean, val manualW: Int, val manualH: Int, val manualHz: Int,
+    )
 
     private val listener = object : NativeBridge.Listener {
-        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int) {
+        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int) {
             runOnUiThread {
-                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps)
+                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps, mirror, manualW, manualH, manualHz)
                 applyPanelRate(fps)
             }
         }
@@ -351,20 +354,29 @@ class MainActivity : ComponentActivity() {
                 onOpenSettings = { settingsOpen = !settingsOpen },
                 onDisconnect = { leaveStream(null) },
             ) {
-                var hz by remember { mutableStateOf(0) }
-                var res by remember { mutableStateOf(0 to 0) }
+                // Shown from what the PC reports, so both sides always agree.
+                val mirror = cfg?.mirror ?: false
+                val hz = cfg?.manualHz ?: 0
+                val res = (cfg?.manualW ?: 0) to (cfg?.manualH ?: 0)
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    ChoiceRow(
+                        "模式",
+                        listOf(Choice("副屏", false), Choice("镜像", true)),
+                        mirror,
+                        { NativeBridge.sendSetDisplay(res.first, res.second, hz, it) },
+                    )
                     ChoiceRow(
                         "分辨率",
                         listOf(Choice("自适应", 0 to 0), Choice("1080p", 1920 to 1080), Choice("1440p", 2560 to 1440)),
                         res,
-                        { res = it; NativeBridge.sendSetDisplay(it.first, it.second, hz, 0) },
+                        { NativeBridge.sendSetDisplay(it.first, it.second, hz, mirror) },
+                        enabled = !mirror,
                     )
                     ChoiceRow(
                         "刷新率",
                         listOf(Choice("自动", 0)) + rates.map { Choice("$it", it) },
                         hz,
-                        { hz = it; NativeBridge.sendSetDisplay(res.first, res.second, it, 0) },
+                        { NativeBridge.sendSetDisplay(res.first, res.second, it, mirror) },
                     )
                 }
             }
