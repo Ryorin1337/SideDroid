@@ -127,6 +127,11 @@ void Client::tcpLoop() {
                 if (cb_.onConfig) cb_.onConfig(*c);
             }
             break;
+        case MsgType::DisplayOptions:
+            if (auto o = decodeDisplayOptions(body)) {
+                if (cb_.onDisplayOptions) cb_.onDisplayOptions(*o);
+            }
+            break;
         case MsgType::Frame:
             winFrames_.fetch_add(1);
             handleFrameMessage(msg.data(), msg.size());

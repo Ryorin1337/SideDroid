@@ -25,17 +25,13 @@ constexpr UINT kTooltipIntervalMs = 2000;
 enum MenuId : UINT {
     ID_OPEN = 1, ID_EXIT, ID_DISCONNECT, ID_WIRELESS, ID_PAIR, ID_INSTALL_DRIVER,
     ID_MODE_EXTEND = 10, ID_MODE_MIRROR,
-    ID_RES_BASE = 20,
-    ID_HZ_BASE = 40,
-    ID_QUALITY_BASE = 60,
+    ID_RES_PHONE = 20, ID_RES_PC,
+    ID_RES_BASE = 30,      // up to 40 sizes
+    ID_SCALE_BASE = 80,    // up to 20 steps
+    ID_HZ_BASE = 100,      // up to 20 rates
+    ID_QUALITY_BASE = 120,
 };
 
-struct ResChoice { const wchar_t* label; uint16_t w, h; };
-const ResChoice kResolutions[] = {
-    {L"自适应", 0, 0}, {L"1080p", 1920, 1080}, {L"1440p", 2560, 1440}, {L"4K", 3840, 2160},
-};
-struct HzChoice { const wchar_t* label; uint16_t hz; };
-const HzChoice kRates[] = {{L"自动", 0}, {L"60 Hz", 60}, {L"90 Hz", 90}, {L"120 Hz", 120}};
 struct QualityChoice { const wchar_t* label; uint32_t kbps; };
 const QualityChoice kQualities[] = {{L"自适应", 0}, {L"省流", 10000}, {L"均衡", 25000}, {L"高清", 50000}};
 
@@ -52,6 +48,11 @@ std::wstring exeDir() {
 }
 
 void openConsole() {
+    // Whatever goes wrong elsewhere, a burst of clicks or messages cannot pile up processes.
+    static ULONGLONG last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (last != 0 && now - last < 2000) return;
+    last = now;
     const auto path = exeDir() + L"\\console\\SideDroid.exe";
     if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
         logf("cannot start console at %s", narrow(path).c_str());
@@ -88,7 +89,7 @@ std::vector<std::wstring> statusLines() {
         return out;
     }
     if (l.displayW > 0) {
-        out.push_back(format(L"%s · %d×%d · %.0f fps", l.usingVirtualDisplay ? L"副屏" : L"镜像", l.displayW, l.displayH, l.measuredFps));
+        out.push_back(format(L"%s · %d×%d · %d%% · %.0f fps", l.usingVirtualDisplay ? L"副屏" : L"镜像", l.displayW, l.displayH, l.usingVirtualDisplay ? l.currentScale : 100, l.measuredFps));
         out.push_back(format(L"%.1f Mbps · 延迟 %u ms · %s %s", l.kbps / 1000.0, l.rttMs, widen(l.encoder).c_str(), widen(l.codec).c_str()));
     }
     return out;
@@ -126,15 +127,33 @@ void showMenu(HWND hwnd) {
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(modeMenu), s.mirror ? L"模式：镜像" : L"模式：副屏");
 
     HMENU resMenu = CreatePopupMenu();
-    for (UINT i = 0; i < _countof(kResolutions); ++i) {
-        const auto& r = kResolutions[i];
-        addRadio(resMenu, ID_RES_BASE + i, r.label, s.width == r.w && s.height == r.h);
-    }
+    const Size pc = primaryDisplaySize();
+    const std::wstring phoneLabel = l.phoneW ? format(L"自适应手机（%d×%d）（推荐）", l.phoneW, l.phoneH) : L"自适应手机（推荐）";
+    addRadio(resMenu, ID_RES_PHONE, phoneLabel.c_str(), s.width == 0 && s.height == 0);
+    addRadio(resMenu, ID_RES_PC, format(L"自适应电脑（%d×%d）", pc.width, pc.height).c_str(), s.width == kResolutionMatchPc);
+    AppendMenuW(resMenu, MF_SEPARATOR, 0, nullptr);
+    const std::vector<Size> sizes = commonResolutions(l.maxDecodeLong, l.maxDecodeShort);
+    for (UINT i = 0; i < sizes.size() && i < 40; ++i)
+        addRadio(resMenu, ID_RES_BASE + i, format(L"%d×%d", sizes[i].width, sizes[i].height).c_str(), s.width == sizes[i].width && s.height == sizes[i].height);
     // Mirroring always shows the main display at its own resolution.
     AppendMenuW(menu, MF_POPUP | (s.mirror ? MF_GRAYED : 0), reinterpret_cast<UINT_PTR>(resMenu), L"分辨率");
 
+    HMENU scaleMenu = CreatePopupMenu();
+    const auto& steps = scaleSteps();
+    for (UINT i = 0; i < steps.size(); ++i) {
+        const bool recommended = l.recommendedScale == steps[i];
+        const std::wstring label = recommended ? format(L"%d%%（推荐）", steps[i]) : format(L"%d%%", steps[i]);
+        const uint16_t shown = s.scalePercent ? s.scalePercent : l.recommendedScale;
+        addRadio(scaleMenu, ID_SCALE_BASE + i, label.c_str(), shown == steps[i]);
+    }
+    AppendMenuW(menu, MF_POPUP | (s.mirror ? MF_GRAYED : 0), reinterpret_cast<UINT_PTR>(scaleMenu), L"缩放");
+
     HMENU hzMenu = CreatePopupMenu();
-    for (UINT i = 0; i < _countof(kRates); ++i) addRadio(hzMenu, ID_HZ_BASE + i, kRates[i].label, s.hz == kRates[i].hz);
+    // A phone that has connected says what it can show. Until then, the usual ones.
+    std::vector<uint16_t> rates = l.phoneRates.empty() ? std::vector<uint16_t>{60, 90, 120} : l.phoneRates;
+    addRadio(hzMenu, ID_HZ_BASE, L"最高（推荐）", s.hz == 0);
+    for (UINT i = 0; i < rates.size() && i < 18; ++i)
+        addRadio(hzMenu, ID_HZ_BASE + 1 + i, format(L"%d Hz", rates[i]).c_str(), s.hz == rates[i]);
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(hzMenu), L"刷新率");
 
     HMENU qualityMenu = CreatePopupMenu();
@@ -178,12 +197,22 @@ void showMenu(HWND hwnd) {
     } else if (cmd == ID_MODE_EXTEND || cmd == ID_MODE_MIRROR) {
         next.mirror = cmd == ID_MODE_MIRROR;
         g_host->applySettings(next);
-    } else if (cmd >= ID_RES_BASE && cmd < ID_RES_BASE + _countof(kResolutions)) {
-        next.width = kResolutions[cmd - ID_RES_BASE].w;
-        next.height = kResolutions[cmd - ID_RES_BASE].h;
+    } else if (cmd == ID_RES_PHONE || cmd == ID_RES_PC) {
+        next.width = next.height = cmd == ID_RES_PC ? kResolutionMatchPc : 0;
         g_host->applySettings(next);
-    } else if (cmd >= ID_HZ_BASE && cmd < ID_HZ_BASE + _countof(kRates)) {
-        next.hz = kRates[cmd - ID_HZ_BASE].hz;
+    } else if (cmd >= ID_RES_BASE && cmd < ID_RES_BASE + sizes.size()) {
+        next.width = sizes[cmd - ID_RES_BASE].width;
+        next.height = sizes[cmd - ID_RES_BASE].height;
+        g_host->applySettings(next);
+    } else if (cmd >= ID_SCALE_BASE && cmd < ID_SCALE_BASE + steps.size()) {
+        const uint16_t chosen = steps[cmd - ID_SCALE_BASE];
+        next.scalePercent = chosen == l.recommendedScale ? 0 : chosen;
+        g_host->applySettings(next);
+    } else if (cmd == ID_HZ_BASE) {
+        next.hz = 0;
+        g_host->applySettings(next);
+    } else if (cmd > ID_HZ_BASE && cmd <= ID_HZ_BASE + rates.size()) {
+        next.hz = rates[cmd - ID_HZ_BASE - 1];
         g_host->applySettings(next);
     } else if (cmd >= ID_QUALITY_BASE && cmd < ID_QUALITY_BASE + _countof(kQualities)) {
         next.maxKbps = kQualities[cmd - ID_QUALITY_BASE].kbps;
@@ -308,7 +337,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // One tray host per user. Test runs on other ports may coexist.
     HANDLE single = CreateMutexW(nullptr, TRUE, (L"Local\\SideDroidHost-" + std::to_wstring(opts.port)).c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!headless) openConsole();
+        // Only exit. The console starts a host when it needs one, so if a duplicate
+        // host opened a console in return, the two could start each other forever.
         return 0;
     }
 

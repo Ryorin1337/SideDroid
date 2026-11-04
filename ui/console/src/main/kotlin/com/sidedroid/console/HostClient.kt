@@ -1,5 +1,6 @@
 package com.sidedroid.console
 
+import com.sidedroid.design.DisplayOptionsUi
 import java.io.File
 import java.io.RandomAccessFile
 import kotlinx.serialization.json.Json
@@ -20,6 +21,7 @@ data class HostSettings(
     val maxKbps: Int = 0,
     val allowWireless: Boolean = true,
     val mirror: Boolean = false,
+    val scale: Int = 0,
 )
 
 data class PairedDevice(val id: String, val name: String)
@@ -52,6 +54,7 @@ data class HostStatus(
     val usbUnauthorized: Boolean = false,
     val usbCount: Int = 0,
     val paired: List<PairedDevice> = emptyList(),
+    val options: DisplayOptionsUi = DisplayOptionsUi(),
 )
 
 /** Parses the host's status line. Unknown or missing fields keep their defaults. */
@@ -87,7 +90,17 @@ fun parseStatus(line: String): HostStatus {
         adbFound = b("adbFound", true),
         pairingCode = s("pairingCode"),
         pairingSeconds = i("pairingSeconds"),
-        settings = HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", true, set), b("mirror", false, set)),
+        settings = HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", true, set), b("mirror", false, set), i("scale", set)),
+        options = (o["options"]?.jsonObject ?: JsonObject(emptyMap())).let { opt ->
+            DisplayOptionsUi(
+                phone = i("phoneW", opt) to i("phoneH", opt),
+                pc = i("pcW", opt) to i("pcH", opt),
+                resolutions = opt["resolutions"]?.jsonArray?.map { i("w", it.jsonObject) to i("h", it.jsonObject) } ?: emptyList(),
+                rates = opt["rates"]?.jsonArray?.mapNotNull { it.jsonPrimitive.intOrNull }?.ifEmpty { null } ?: listOf(60, 90, 120),
+                recommendedScale = i("recommendedScale", opt),
+                currentScale = i("currentScale", opt),
+            )
+        },
         usbUnauthorized = usb.any { s("state", it) == "unauthorized" },
         usbCount = usb.count { s("state", it) == "device" },
         paired = o["pairedDevices"]?.jsonArray?.map { PairedDevice(s("id", it.jsonObject), s("name", it.jsonObject)) } ?: emptyList(),
@@ -99,7 +112,7 @@ fun parseStatus(line: String): HostStatus {
  * the UI thread. Starts the host if it is not running, since the console is often
  * what the user opens first.
  */
-class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
+class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""", private val mayStartHost: Boolean = true) {
     private var pipe: RandomAccessFile? = null
     private var launchAttemptedAt = 0L
 
@@ -113,7 +126,10 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
         }
     }
 
+    // Harmless when a host is already running: a second one exits right away, and it
+    // never opens a console in return.
     private fun startHostOnce() {
+        if (!mayStartHost) return
         val now = System.currentTimeMillis()
         if (now - launchAttemptedAt < 10_000) return
         launchAttemptedAt = now
@@ -150,7 +166,7 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
 
     fun status(): HostStatus = exchange("""{"cmd":"status"}""")?.let { runCatching { parseStatus(it) }.getOrNull() } ?: HostStatus()
 
-    fun setDisplay(width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean, mirror: Boolean) {
+    fun setDisplay(width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean, mirror: Boolean, scale: Int) {
         val body = buildJsonObject {
             put("cmd", "set")
             put("width", width)
@@ -159,6 +175,7 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""") {
             put("maxKbps", maxKbps)
             put("allowWireless", allowWireless)
             put("mirror", mirror)
+            put("scale", scale)
         }
         exchange(body.toString())
     }

@@ -13,7 +13,8 @@ class HostClientTest {
             "displayW":2400,"displayH":1080,"hz":120,"encodeW":1680,"encodeH":756,"fps":60,"kbps":12000,"measuredKbps":11000,
             "rttMs":7,"decodeMs":4,"encodeMs":3.5,"measuredFps":59.8,"lossPercent":1.25,"framesDropped":2,
             "usingVirtualDisplay":true,"virtualDisplayInstalled":true,"adbFound":false,"pairingCode":"K7QM-2XPD","pairingSeconds":88,
-            "settings":{"width":1920,"height":1080,"hz":90,"maxKbps":25000,"allowWireless":false,"mirror":true},
+            "settings":{"width":1920,"height":1080,"hz":90,"maxKbps":25000,"allowWireless":false,"mirror":true,"scale":175},
+            "options":{"phoneW":3168,"phoneH":1440,"pcW":2560,"pcH":1600,"recommendedScale":225,"currentScale":175,"rates":[60,120],"resolutions":[{"w":1920,"h":1080}]},
             "usbDevices":[{"serial":"A","state":"device"},{"serial":"B","state":"unauthorized"}],
             "pairedDevices":[{"id":"ab","name":"Tab"}]}""".replace("\n", ""),
         )
@@ -21,7 +22,11 @@ class HostClientTest {
         assertEquals("Pixel \"9\"", s.device)
         assertEquals(1680, s.encodeW)
         assertEquals(59.8, s.measuredFps)
-        assertEquals(HostSettings(1920, 1080, 90, 25000, false, true), s.settings)
+        assertEquals(HostSettings(1920, 1080, 90, 25000, false, true, 175), s.settings)
+        assertEquals(3168 to 1440, s.options.phone)
+        assertEquals(listOf(1920 to 1080), s.options.resolutions)
+        assertEquals(listOf(60, 120), s.options.rates)
+        assertEquals(225, s.options.recommendedScale)
         assertEquals(1, s.usbCount)
         assertTrue(s.usbUnauthorized)
         assertFalse(s.adbFound)

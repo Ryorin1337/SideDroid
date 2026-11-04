@@ -31,7 +31,8 @@ int main(int argc, char** argv) {
     uint16_t w = 1920, h = 1080;
     uint8_t codecs = kCodecHevc | kCodecH264;
     bool requestKey = false;
-    int mirrorAt = -1, extendAt = -1;
+    int mirrorAt = -1, extendAt = -1, scaleAt = -1;
+    uint16_t scaleTo = 0, density = 160;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
@@ -44,6 +45,8 @@ int main(int argc, char** argv) {
         else if (a == "--size") { w = static_cast<uint16_t>(atoi(next())); h = static_cast<uint16_t>(atoi(next())); }
         else if (a == "--h264") codecs = kCodecH264;
         else if (a == "--request-key") requestKey = true;
+        else if (a == "--density") density = static_cast<uint16_t>(atoi(next()));
+        else if (a == "--scale-at") { scaleAt = atoi(next()); scaleTo = static_cast<uint16_t>(atoi(next())); }
         else if (a == "--mirror-at") mirrorAt = atoi(next());
         else if (a == "--extend-at") extendAt = atoi(next());
     }
@@ -56,7 +59,7 @@ int main(int argc, char** argv) {
     opts.hello.deviceName = "sd-loopback";
     opts.hello.nativeWidth = w;
     opts.hello.nativeHeight = h;
-    opts.hello.densityDpi = 160;
+    opts.hello.densityDpi = density;
     opts.hello.codecs = codecs;
     opts.hello.maxDecodeWidth = 3840;
     opts.hello.maxDecodeHeight = 2160;
@@ -90,6 +93,11 @@ int main(int argc, char** argv) {
         latencies.push_back(static_cast<int64_t>(monotonicUs() - fh.captureUs));
         if (out) fwrite(d, 1, n, out);
     };
+    cb.onDisplayOptions = [&](const DisplayOptions& o) {
+        printf("options: phone %dx%d pc %dx%d scale recommended=%d current=%d sizes=%zu\n", o.phone.width, o.phone.height,
+               o.pc.width, o.pc.height, o.recommendedScale, o.currentScale, o.resolutions.size());
+        fflush(stdout);
+    };
     std::atomic<bool> gone{false};
     cb.onDisconnected = [&](const std::string& why) {
         printf("disconnected: %s\n", why.c_str());
@@ -108,6 +116,11 @@ int main(int argc, char** argv) {
         uint64_t b = secondBytes.exchange(0);
         kbpsPerSecond.push_back(b * 8 / 1000);
         if (requestKey && s == seconds / 2) client.requestKeyframe();
+        if (s == scaleAt) {
+            SetDisplay sd{0, 0, 0, kKeepBitrate, kMirrorKeep};
+            sd.scale = scaleTo;
+            client.sendSetDisplay(sd);
+        }
         if (s == mirrorAt) client.sendSetDisplay(SetDisplay{0, 0, 0, kKeepBitrate, kMirrorOn});
         if (s == extendAt) client.sendSetDisplay(SetDisplay{0, 0, 0, kKeepBitrate, kMirrorOff});
         printf("t=%2ds %6llu kbps frames=%llu rtt=%uus\n", s + 1, static_cast<unsigned long long>(b * 8 / 1000),

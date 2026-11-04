@@ -62,6 +62,7 @@ H -> C: confirmHost(32)
 | 11 UdpSetup | H→C | Host 的 UDP 端口 |
 | 12 Bye | 双向 | 主动断开 |
 | 13 Viewport | C→H | 屏幕旋转或尺寸变化 |
+| 14 DisplayOptions | H→C | 手机和电脑的尺寸、推荐和当前缩放、可选的分辨率列表 |
 
 ## UDP 分片和 FEC
 
@@ -90,16 +91,17 @@ H -> C: confirmHost(32)
 - **副屏：** 连接时先保存当前布局，再把虚拟屏放到独立的 source 上。Windows 可能把新显示器放进复制组，那时它和主屏共用一个 source，改模式会同时改到主屏，所以 Host 拒绝修改任何含有真实显示器的输出。
 - **镜像：** 不使用 Windows 的复制模式，直接采集主屏，虚拟屏不上桌面，主屏的任何设置都不变。
 - **恢复：** 手机离开 5 秒后恢复保存的布局，短暂掉线不会让窗口跳来跳去。布局同时写入 `%LOCALAPPDATA%\SideDroid\display-layout-to-restore.bin`，程序崩溃或断电后，下次启动时恢复。
+- **缩放：** 通过 `DisplayConfigSetDeviceInfo` 的未公开类型 -3 和 -4 设置，和 Windows 显示设置里的缩放是同一项，只作用于虚拟屏。推荐值取满足“逻辑尺寸至少 1280×600”且不超过手机自身密度的最大档位。
 - **开机：** 驱动的显示器开机就会出现，由 SideDroid 安装驱动时，Host 启动会把它从桌面取下。
 
 ## 控制台管道
 
-`\\.\pipe\SideDroidHost` 每行一个 JSON，权限只开放给当前用户，并拒绝远程连接。
+`\\.\pipe\SideDroidHost` 每行一个 JSON，权限只开放给当前用户，并拒绝远程连接。最多同时服务 4 个客户端。
 
 | cmd | 参数 |
 |---|---|
 | `status` | 无 |
-| `set` | `width` `height` `hz` `maxKbps` `allowWireless` `mirror` |
+| `set` | `width` `height` `hz` `maxKbps` `allowWireless` `mirror` `scale` |
 | `pair_start` / `pair_cancel` | 无 |
 | `unpair` | `id` |
 | `disconnect` | 无 |

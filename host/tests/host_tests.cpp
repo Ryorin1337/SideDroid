@@ -75,6 +75,30 @@ static void testChooseMode() {
     double aspect = static_cast<double>(m.width) / m.height;
     CHECK(aspect > 2.1 && aspect < 2.3);
 
+    // Following the PC keeps its size, turned to the phone's orientation.
+    SetDisplay pc{kResolutionMatchPc, kResolutionMatchPc, 0, 0};
+    m = chooseMode(h, 2400, 1080, pc, 2560, 1600);
+    CHECK(m.width == 2560 && m.height == 1600);
+    m = chooseMode(h, 1080, 2400, pc, 2560, 1600);
+    CHECK(m.width == 1600 && m.height == 2560);
+    // With the PC's size unknown, the phone's is the safe answer.
+    m = chooseMode(h, 2400, 1080, pc, 0, 0);
+    CHECK(m.width == 2400 && m.height == 1080);
+
+    // Recommended scale: usable logical size, never above the phone's own density.
+    CHECK(recommendedScale(3168, 1440, 520) == 225);
+    CHECK(recommendedScale(2560, 1600, 320) == 200);
+    CHECK(recommendedScale(1920, 1080, 420) == 150);
+    CHECK(recommendedScale(1280, 800, 213) == 100);
+    CHECK(recommendedScale(800, 480, 240) == 100);
+    CHECK(recommendedScale(3840, 2160, 160) == 100);
+    CHECK(recommendedScale(1920, 1080, 0) == 150);
+
+    // The list obeys the decoder's limits.
+    for (const auto& s : commonResolutions(1920, 1080)) CHECK(s.width <= 1920 && s.height <= 1080);
+    CHECK(!commonResolutions(1920, 1080).empty());
+    CHECK(commonResolutions(0, 0).size() > commonResolutions(1920, 1080).size());
+
     // Device with nothing to report still gets something sane.
     Hello empty;
     m = chooseMode(empty, 0, 0, {});

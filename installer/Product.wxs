@@ -52,6 +52,11 @@
                  Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM sidedroid-host.exe" />
     <CustomAction Id="StopHost" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
 
+    <!-- The console runs as the user: this has to happen before files are in use, and as the user. -->
+    <SetProperty Id="WixQuietExecCmdLine" Sequence="execute" Before="StopConsole"
+                 Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM SideDroid.exe" />
+    <CustomAction Id="StopConsole" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+
     <!-- Removes the driver only if SideDroid is the one that installed it. -->
     <SetProperty Id="DriverRemove" Sequence="execute" Before="DriverRemove"
                  Value="&quot;[INSTALLFOLDER]sidedroid-driver-tool.exe&quot; uninstall" />
@@ -61,6 +66,7 @@
     <CustomAction Id="LaunchConsole" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]console\SideDroid.exe&quot;" Execute="immediate" Impersonate="yes" Return="asyncNoWait" />
 
     <InstallExecuteSequence>
+      <Custom Action="StopConsole" Before="InstallValidate" />
       <Custom Action="StopHost" Before="RemoveFiles" Condition="Installed" />
       <Custom Action="DriverRemove" After="StopHost" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="FirewallRemove" After="DriverRemove" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

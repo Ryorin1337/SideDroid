@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <set>
 
@@ -140,6 +141,82 @@ bool queryLayoutWithoutVdd(DisplayLayout& out) {
     DisplayLayout active;
     if (!queryActiveLayout(active)) return false;
     out = layoutWithout(active, [](const auto& p) { return isVddPath(p); });
+    return true;
+}
+
+namespace {
+
+// Undocumented, used through DisplayConfigGetDeviceInfo and DisplayConfigSetDeviceInfo.
+constexpr int kGetDpiScale = -3;
+constexpr int kSetDpiScale = -4;
+struct DpiScaleGet {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t minRelative;
+    int32_t currentRelative;
+    int32_t maxRelative;
+};
+struct DpiScaleSet {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    int32_t relative;
+};
+// All the steps Windows counts through, whichever of them our menus offer.
+constexpr uint16_t kWindowsScales[] = {100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500};
+
+bool findVddSource(DISPLAYCONFIG_PATH_SOURCE_INFO* out) {
+    DisplayLayout active;
+    if (!queryActiveLayout(active)) return false;
+    for (const auto& p : active.paths) {
+        if (isVddPath(p)) {
+            *out = p.sourceInfo;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool queryDpi(const DISPLAYCONFIG_PATH_SOURCE_INFO& src, DpiScaleGet* g) {
+    *g = {};
+    g->header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kGetDpiScale);
+    g->header.size = sizeof(*g);
+    g->header.adapterId = src.adapterId;
+    g->header.id = src.id;
+    return DisplayConfigGetDeviceInfo(&g->header) == ERROR_SUCCESS;
+}
+
+}  // namespace
+
+uint16_t getVddScale() {
+    DISPLAYCONFIG_PATH_SOURCE_INFO src{};
+    DpiScaleGet g;
+    if (!findVddSource(&src) || !queryDpi(src, &g)) return 0;
+    const int index = -g.minRelative + g.currentRelative;
+    if (index < 0 || index >= static_cast<int>(std::size(kWindowsScales))) return 0;
+    return kWindowsScales[index];
+}
+
+bool setVddScale(uint16_t percent) {
+    DISPLAYCONFIG_PATH_SOURCE_INFO src{};
+    DpiScaleGet g;
+    if (!findVddSource(&src) || !queryDpi(src, &g)) return false;
+    int target = -1;
+    for (int i = 0; i < static_cast<int>(std::size(kWindowsScales)); ++i)
+        if (kWindowsScales[i] == percent) target = i;
+    if (target < 0) return false;
+    // Relative to the step Windows recommends, which is step -minRelative. A panel
+    // can limit how far it goes, so an out of range request takes the nearest one.
+    const int relative = std::clamp(target + g.minRelative, g.minRelative, g.maxRelative);
+    if (relative == g.currentRelative) return true;
+    DpiScaleSet s{};
+    s.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kSetDpiScale);
+    s.header.size = sizeof(s);
+    s.header.adapterId = src.adapterId;
+    s.header.id = src.id;
+    s.relative = relative;
+    const LONG r = DisplayConfigSetDeviceInfo(&s.header);
+    if (r != ERROR_SUCCESS) {
+        logf("setting display scale failed: %ld", r);
+        return false;
+    }
     return true;
 }
 

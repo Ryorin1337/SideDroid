@@ -26,8 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.sidedroid.design.Choice
-import com.sidedroid.design.ChoiceRow
+import com.sidedroid.design.DisplaySettings
+import com.sidedroid.design.DisplayValue
 import com.sidedroid.design.ConnectionVisual
 import com.sidedroid.design.MetricTile
 import com.sidedroid.design.PairingCodeText
@@ -44,15 +44,6 @@ data class ConsoleActions(
     val onUnpair: (String) -> Unit = {},
 )
 
-private val DisplayModes = listOf(Choice("副屏", false), Choice("镜像", true))
-private val Resolutions = listOf(
-    Choice("自适应", 0 to 0),
-    Choice("1080p", 1920 to 1080),
-    Choice("1440p", 2560 to 1440),
-    Choice("4K", 3840 to 2160),
-)
-private val Rates = listOf(Choice("自动", 0), Choice("60", 60), Choice("90", 90), Choice("120", 120))
-private val Bitrates = listOf(Choice("自适应", 0), Choice("省流", 10_000), Choice("均衡", 25_000), Choice("高清", 50_000))
 
 private fun errorText(code: String) = when (code) {
     "virtual_display_missing" -> "未找到虚拟显示驱动"
@@ -112,11 +103,13 @@ fun ConsoleScreen(status: HostStatus, actions: ConsoleActions, modifier: Modifie
 
         val set = status.settings
         SectionCard {
-            ChoiceRow("模式", DisplayModes, set.mirror, { actions.onSetDisplay(set.copy(mirror = it)) }, enabled = status.reachable)
-            // Mirroring always shows the main display at its own resolution.
-            ChoiceRow("分辨率", Resolutions, set.width to set.height, { (w, h) -> actions.onSetDisplay(set.copy(width = w, height = h)) }, enabled = status.reachable && !set.mirror)
-            ChoiceRow("刷新率", Rates, set.hz, { actions.onSetDisplay(set.copy(hz = it)) }, enabled = status.reachable)
-            ChoiceRow("画质", Bitrates, set.maxKbps, { actions.onSetDisplay(set.copy(maxKbps = it)) }, enabled = status.reachable)
+            DisplaySettings(
+                status.options,
+                DisplayValue(set.mirror, set.width, set.height, set.hz, set.scale, set.maxKbps),
+                showQuality = true,
+                enabled = status.reachable,
+                onChange = { actions.onSetDisplay(set.copy(mirror = it.mirror, width = it.width, height = it.height, hz = it.hz, scale = it.scale, maxKbps = it.maxKbps)) },
+            )
         }
 
         SectionCard {

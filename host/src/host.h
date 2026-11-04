@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "adb.h"
 #include "discovery.h"
@@ -47,6 +48,10 @@ struct LiveStatus {
     uint32_t framesDropped = 0;
     double encodeMs = 0, measuredFps = 0;
     bool usingVirtualDisplay = false;
+    uint16_t phoneW = 0, phoneH = 0;
+    uint16_t maxDecodeLong = 0, maxDecodeShort = 0;
+    uint16_t recommendedScale = 0, currentScale = 0;
+    std::vector<uint16_t> phoneRates;
     std::string sourceName;
 };
 

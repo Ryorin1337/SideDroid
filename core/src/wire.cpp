@@ -56,6 +56,7 @@ Bytes encode(const Config& m) {
     w.u16(m.manualWidth);
     w.u16(m.manualHeight);
     w.u16(m.manualHz);
+    w.u16(m.manualScale);
     return b;
 }
 
@@ -72,6 +73,7 @@ std::optional<Config> decodeConfig(Reader r) {
     m.manualWidth = r.u16();
     m.manualHeight = r.u16();
     m.manualHz = r.u16();
+    m.manualScale = r.u16();
     if (!r.ok()) return std::nullopt;
     return m;
 }
@@ -167,6 +169,7 @@ Bytes encode(const SetDisplay& m) {
     w.u16(m.hz);
     w.u32(m.maxBitrateKbps);
     w.u8(m.mirror);
+    w.u16(m.scale);
     return b;
 }
 
@@ -177,6 +180,7 @@ std::optional<SetDisplay> decodeSetDisplay(Reader r) {
     m.hz = r.u16();
     m.maxBitrateKbps = r.u32();
     m.mirror = r.u8();
+    m.scale = r.u16();
     if (!r.ok() || m.mirror > kMirrorKeep) return std::nullopt;
     return m;
 }
@@ -234,6 +238,42 @@ Bytes encode(const UdpSetup& m) {
 std::optional<UdpSetup> decodeUdpSetup(Reader r) {
     UdpSetup m;
     m.port = r.u16();
+    if (!r.ok()) return std::nullopt;
+    return m;
+}
+
+Bytes encode(const DisplayOptions& m) {
+    Bytes b;
+    auto w = start(b, MsgType::DisplayOptions);
+    w.u16(m.phone.width);
+    w.u16(m.phone.height);
+    w.u16(m.pc.width);
+    w.u16(m.pc.height);
+    w.u16(m.recommendedScale);
+    w.u16(m.currentScale);
+    w.u8(static_cast<uint8_t>(m.resolutions.size()));
+    for (const auto& s : m.resolutions) {
+        w.u16(s.width);
+        w.u16(s.height);
+    }
+    return b;
+}
+
+std::optional<DisplayOptions> decodeDisplayOptions(Reader r) {
+    DisplayOptions m;
+    m.phone.width = r.u16();
+    m.phone.height = r.u16();
+    m.pc.width = r.u16();
+    m.pc.height = r.u16();
+    m.recommendedScale = r.u16();
+    m.currentScale = r.u16();
+    int n = r.u8();
+    for (int i = 0; i < n && r.ok(); ++i) {
+        Size s;
+        s.width = r.u16();
+        s.height = r.u16();
+        m.resolutions.push_back(s);
+    }
     if (!r.ok()) return std::nullopt;
     return m;
 }

@@ -1,8 +1,12 @@
 # Read-only checks of what package.ps1 produced. Installs nothing.
-param([string]$Version = '0.2.0')
+param([string]$Version = '0.0.1')
 $root = Resolve-Path "$PSScriptRoot\.."
 $failed = 0
 function Check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:failed++ } }
+
+# The version shown in the about dialog must be the one being packaged.
+Check 'about dialog shows this version' ((Get-Content "$root\ui\design\src\com\sidedroid\design\About.kt" -Raw -Encoding utf8) -match ('VERSION = "' + [regex]::Escape($Version) + '"'))
+Check 'licence is packaged' (Test-Path "$root\out\dist\LICENSE.txt")
 
 # APK
 Add-Type -AssemblyName System.IO.Compression.FileSystem

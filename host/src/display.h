@@ -38,7 +38,20 @@ bool attachOutput(const std::wstring& deviceName, const DisplayMode& m);
 // Picks what to request from Windows for this device.
 //   manual non-zero fields win; otherwise native size and the fastest rate.
 // Orientation of manual sizes follows the device's current orientation.
-DisplayMode chooseMode(const Hello& hello, uint16_t viewportW, uint16_t viewportH, const SetDisplay& manual);
+// kResolutionMatchPc asks for the size of the PC's main display, given as pcW and pcH.
+DisplayMode chooseMode(const Hello& hello, uint16_t viewportW, uint16_t viewportH, const SetDisplay& manual,
+                       uint16_t pcW = 0, uint16_t pcH = 0);
+
+// The steps Windows offers for display scaling, in percent.
+const std::vector<uint16_t>& scaleSteps();
+// The largest step that keeps a desktop usable on this panel: a logical size of at
+// least 1280x600 for windows designed for a PC, and controls no larger than the
+// phone's own apps would draw them. Pure, for testing.
+uint16_t recommendedScale(uint16_t width, uint16_t height, uint16_t densityDpi);
+// Common sizes this decoder can take, largest first. Zero limits mean unknown.
+std::vector<Size> commonResolutions(uint16_t maxLong, uint16_t maxShort);
+// Physical size of the main display.
+Size primaryDisplaySize();
 
 // Edits only <resolutions>, <g_refresh_rate> entries; every other setting stays.
 // Pure, for testing. Returns the new document, or nullopt if nothing changed.

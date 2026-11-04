@@ -280,8 +280,23 @@ JNIEXPORT jstring JNICALL Java_com_sidedroid_app_NativeBridge_start(
         auto s = weak.lock();
         if (!s) return;
         s->decoder.configure(c);
-        call(s->listener, "onConfig", "(IIIIIIIZIII)V", c.displayWidth, c.displayHeight, c.encodeWidth, c.encodeHeight,
-             c.fps, c.codec, static_cast<jint>(c.bitrateKbps), c.mirror ? JNI_TRUE : JNI_FALSE, c.manualWidth, c.manualHeight, c.manualHz);
+        call(s->listener, "onConfig", "(IIIIIIIZIIII)V", c.displayWidth, c.displayHeight, c.encodeWidth, c.encodeHeight,
+             c.fps, c.codec, static_cast<jint>(c.bitrateKbps), c.mirror ? JNI_TRUE : JNI_FALSE, c.manualWidth, c.manualHeight, c.manualHz, c.manualScale);
+    };
+    cb.onDisplayOptions = [weak](const DisplayOptions& o) {
+        auto s = weak.lock();
+        if (!s) return;
+        JniScope e;
+        std::vector<jint> flat;
+        for (const auto& r : o.resolutions) {
+            flat.push_back(r.width);
+            flat.push_back(r.height);
+        }
+        jintArray arr = e->NewIntArray(static_cast<jsize>(flat.size()));
+        e->SetIntArrayRegion(arr, 0, static_cast<jsize>(flat.size()), flat.data());
+        call(s->listener, "onDisplayOptions", "(IIIIII[I)V", o.phone.width, o.phone.height, o.pc.width, o.pc.height,
+             o.recommendedScale, o.currentScale, arr);
+        e->DeleteLocalRef(arr);
     };
     cb.onFrame = [weak](const FrameHeader& h, const uint8_t* d, size_t n) {
         auto s = weak.lock();
@@ -364,11 +379,11 @@ JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendViewport(JNIEnv*,
     if (auto s = current()) s->client->sendViewport(static_cast<uint16_t>(w), static_cast<uint16_t>(h));
 }
 
-JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendSetDisplay(JNIEnv*, jobject, jint w, jint h, jint hz, jboolean mirror) {
+JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendSetDisplay(JNIEnv*, jobject, jint w, jint h, jint hz, jboolean mirror, jint scale) {
     // The phone has no quality control of its own, so that setting stays as it is.
     if (auto s = current())
         s->client->sendSetDisplay(SetDisplay{static_cast<uint16_t>(w), static_cast<uint16_t>(h), static_cast<uint16_t>(hz),
-                                             kKeepBitrate, mirror ? kMirrorOn : kMirrorOff});
+                                             kKeepBitrate, mirror ? kMirrorOn : kMirrorOff, static_cast<uint16_t>(scale)});
 }
 
 JNIEXPORT jint JNICALL Java_com_sidedroid_app_NativeBridge_rttUs(JNIEnv*, jobject) {

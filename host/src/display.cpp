@@ -123,7 +123,45 @@ bool attachOutput(const std::wstring& deviceName, const DisplayMode& m) {
     return true;
 }
 
-DisplayMode chooseMode(const Hello& hello, uint16_t vpW, uint16_t vpH, const SetDisplay& manual) {
+const std::vector<uint16_t>& scaleSteps() {
+    static const std::vector<uint16_t> steps{100, 125, 150, 175, 200, 225, 250, 300, 350};
+    return steps;
+}
+
+uint16_t recommendedScale(uint16_t width, uint16_t height, uint16_t densityDpi) {
+    const int longer = std::max(width, height), shorter = std::min(width, height);
+    double limit = std::min(longer / 1280.0, shorter / 600.0);
+    if (densityDpi > 0) limit = std::min(limit, densityDpi / 160.0);
+    uint16_t best = 100;
+    for (uint16_t s : scaleSteps())
+        if (s <= limit * 100.0 + 0.01) best = s;
+    return best;
+}
+
+std::vector<Size> commonResolutions(uint16_t maxLong, uint16_t maxShort) {
+    static const Size all[] = {{3840, 2160}, {3440, 1440}, {2880, 1800}, {2560, 1600}, {2560, 1440}, {2400, 1080},
+                               {1920, 1200}, {1920, 1080}, {1680, 1050}, {1600, 900},  {1366, 768},  {1280, 800},
+                               {1280, 720}};
+    std::vector<Size> out;
+    for (const auto& s : all)
+        if ((maxLong == 0 || s.width <= maxLong) && (maxShort == 0 || s.height <= maxShort)) out.push_back(s);
+    return out;
+}
+
+Size primaryDisplaySize() {
+    for (const auto& o : listOutputs()) {
+        if (o.primary)
+            return {static_cast<uint16_t>(o.rect.right - o.rect.left), static_cast<uint16_t>(o.rect.bottom - o.rect.top)};
+    }
+    return {};
+}
+
+DisplayMode chooseMode(const Hello& hello, uint16_t vpW, uint16_t vpH, const SetDisplay& manualIn, uint16_t pcW, uint16_t pcH) {
+    SetDisplay manual = manualIn;
+    if (manual.width == kResolutionMatchPc) {
+        manual.width = pcW;
+        manual.height = pcH;
+    }
     uint16_t w = vpW ? vpW : hello.nativeWidth;
     uint16_t h = vpH ? vpH : hello.nativeHeight;
     if (w == 0 || h == 0) { w = 1920; h = 1080; }

@@ -37,4 +37,10 @@ bool queryLayoutWithoutVdd(DisplayLayout& out);
 // a phone mirror the laptop. Returns the GDI name of its source, or empty on failure.
 std::wstring isolateVdd();
 
+// Display scaling of the virtual display, the same setting as in Windows' display
+// settings. Windows has no public API for this one, and it only stores steps relative
+// to its own recommendation. Returns 0 when unavailable.
+uint16_t getVddScale();
+bool setVddScale(uint16_t percent);
+
 }  // namespace sd

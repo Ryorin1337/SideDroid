@@ -30,6 +30,7 @@ class Client {
 public:
     struct Callbacks {
         std::function<void(const Config&)> onConfig;
+        std::function<void(const DisplayOptions&)> onDisplayOptions;
         // Runs on the network thread. data is valid only during the call.
         std::function<void(const FrameHeader&, const uint8_t* data, size_t size)> onFrame;
         std::function<void(const std::string& reason)> onDisconnected;

@@ -59,6 +59,7 @@ private:
     void handleNack(const Nack& n);
     bool prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* mode);
     uint32_t bitrateCap(const DisplayMode& m) const;
+    DisplayOptions displayOptions() const;
 
     Host& host_;
     SessionKeys keys_;
@@ -73,6 +74,7 @@ private:
     std::atomic<bool> displayDirty_{false};
     std::atomic<bool> keyRequested_{true};
     std::atomic<uint16_t> viewportW_{0}, viewportH_{0};
+    uint16_t recommendedScale_ = 100, currentScale_ = 100;  // video thread only
 
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
@@ -101,6 +103,17 @@ private:
     std::unique_ptr<TouchInjector> touch_;
     std::mutex touchMutex_;
 };
+
+DisplayOptions Session::displayOptions() const {
+    DisplayOptions o;
+    o.phone = {hello_.nativeWidth, hello_.nativeHeight};
+    o.pc = primaryDisplaySize();
+    o.recommendedScale = recommendedScale_;
+    o.currentScale = currentScale_;
+    o.resolutions = commonResolutions(std::max(hello_.maxDecodeWidth, hello_.maxDecodeHeight),
+                                      std::min(hello_.maxDecodeWidth, hello_.maxDecodeHeight));
+    return o;
+}
 
 uint32_t Session::bitrateCap(const DisplayMode& m) const {
     auto s = host_.currentSettings();
@@ -208,7 +221,8 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
     const auto& opts = host_.options();
     auto s = host_.currentSettings();
     SetDisplay manual{s.width, s.height, s.hz, s.maxKbps};
-    DisplayMode want = chooseMode(hello_, viewportW_.load(), viewportH_.load(), manual);
+    const Size pc = primaryDisplaySize();
+    DisplayMode want = chooseMode(hello_, viewportW_.load(), viewportH_.load(), manual, pc.width, pc.height);
     *mode = want;
 
     if (!opts.sourceOverride.empty() && !opts.useVirtualDisplayInTest) {
@@ -283,7 +297,15 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
             *mode = *best;
         }
     }
-    return attachOutput(*device, *mode);
+    if (!attachOutput(*device, *mode)) return false;
+
+    // Before capture starts: a change of scale would interrupt it.
+    recommendedScale_ = recommendedScale(mode->width, mode->height, hello_.densityDpi);
+    const uint16_t wantScale = s.scalePercent ? s.scalePercent : recommendedScale_;
+    if (!setVddScale(wantScale)) logf("could not set display scale to %d%%", wantScale);
+    currentScale_ = getVddScale();
+    logf("display scale %d%% (wanted %d%%, recommended %d%%)", currentScale_, wantScale, recommendedScale_);
+    return true;
 }
 
 // Noise tiles moving over the picture: hard to compress and independent of what
@@ -450,8 +472,9 @@ void Session::videoLoop() {
             cfg.manualWidth = s.width;
             cfg.manualHeight = s.height;
             cfg.manualHz = s.hz;
+            cfg.manualScale = s.scalePercent;
         }
-        if (!channel_->send(encode(cfg))) { requestStop(); return; }
+        if (!channel_->send(encode(cfg)) || !channel_->send(encode(displayOptions()))) { requestStop(); return; }
         keyRequested_ = true;
 
         host_.publishStatus([&](LiveStatus& l) {
@@ -467,6 +490,8 @@ void Session::videoLoop() {
             l.kbps = startTarget.bitrateKbps;
             l.usingVirtualDisplay = isVirtual;
             l.sourceName = narrow(device);
+            l.recommendedScale = recommendedScale_;
+            l.currentScale = currentScale_;
         });
 
         const uint64_t frameIntervalUs = 1'000'000 / std::max(fps, 1);
@@ -618,6 +643,7 @@ void Session::recvLoop() {
                 s.hz = d->hz;
                 if (d->maxBitrateKbps != kKeepBitrate) s.maxKbps = d->maxBitrateKbps;
                 if (d->mirror != kMirrorKeep) s.mirror = d->mirror == kMirrorOn;
+                if (d->scale != kKeepScale) s.scalePercent = d->scale;
                 host_.store().setSettings(s);
                 displayDirty_ = true;
             }
@@ -692,6 +718,11 @@ void Session::run() {
         l = LiveStatus{};
         l.connected = true;
         l.device = hello_.deviceName;
+        l.phoneW = hello_.nativeWidth;
+        l.phoneH = hello_.nativeHeight;
+        l.maxDecodeLong = std::max(hello_.maxDecodeWidth, hello_.maxDecodeHeight);
+        l.maxDecodeShort = std::min(hello_.maxDecodeWidth, hello_.maxDecodeHeight);
+        l.phoneRates = hello_.refreshRates;
         l.transport = transport;
     });
 
@@ -819,7 +850,9 @@ bool Host::start() {
     acceptThread_ = std::thread(&Host::acceptLoop, this);
     if (opts_.enableAdb) adb_.start();
     if (opts_.enableIpc) {
-        ipc_ = std::make_unique<IpcServer>([this](const std::string& r) { return handleCommand(r); });
+        // Test runs on other ports must not collide with an installed host.
+        const std::wstring pipe = opts_.port == kDefaultPort ? L"SideDroidHost" : L"SideDroidHost-" + std::to_wstring(opts_.port);
+        ipc_ = std::make_unique<IpcServer>(pipe, [this](const std::string& r) { return handleCommand(r); });
         ipc_->start();
     }
     if (opts_.enableDiscovery && store_.settings().allowWireless) discovery_.start(opts_.port);
@@ -967,8 +1000,28 @@ std::string Host::statusJson() {
       << ",\"pairingCode\":\"" << code << "\",\"pairingSeconds\":" << codeSeconds
       << ",\"settings\":{\"width\":" << settings.width << ",\"height\":" << settings.height << ",\"hz\":" << settings.hz
       << ",\"maxKbps\":" << settings.maxKbps << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false")
-      << ",\"mirror\":" << (settings.mirror ? "true" : "false") << "}"
-      << ",\"usbDevices\":[";
+      << ",\"mirror\":" << (settings.mirror ? "true" : "false") << ",\"scale\":" << settings.scalePercent << "}"
+      << ",\"options\":{";
+    {
+        const Size pc = primaryDisplaySize();
+        o << "\"phoneW\":" << l.phoneW << ",\"phoneH\":" << l.phoneH << ",\"pcW\":" << pc.width << ",\"pcH\":" << pc.height
+          << ",\"recommendedScale\":" << l.recommendedScale << ",\"currentScale\":" << l.currentScale << ",\"rates\":[";
+        bool firstRate = true;
+        for (auto r : l.phoneRates) {
+            if (!firstRate) o << ',';
+            firstRate = false;
+            o << r;
+        }
+        o << "],\"resolutions\":[";
+        bool firstSize = true;
+        for (const auto& r : commonResolutions(l.maxDecodeLong, l.maxDecodeShort)) {
+            if (!firstSize) o << ',';
+            firstSize = false;
+            o << "{\"w\":" << r.width << ",\"h\":" << r.height << "}";
+        }
+        o << "]}";
+    }
+    o << ",\"usbDevices\":[";
     bool first = true;
     for (const auto& d : adb_.devices()) {
         if (!first) o << ',';
@@ -1026,6 +1079,7 @@ std::string Host::handleCommand(const std::string& json) {
         s.maxKbps = static_cast<uint32_t>(jsonGetNumber(json, "maxKbps", s.maxKbps));
         s.allowWireless = jsonGetBool(json, "allowWireless", s.allowWireless);
         s.mirror = jsonGetBool(json, "mirror", s.mirror);
+        s.scalePercent = static_cast<uint16_t>(jsonGetNumber(json, "scale", s.scalePercent));
         applySettings(s);
         return R"({"ok":true})";
     }

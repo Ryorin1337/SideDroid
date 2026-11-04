@@ -78,25 +78,8 @@ bool jsonGetBool(const std::string& json, const char* key, bool fallback) {
     return fallback;
 }
 
-static constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\SideDroidHost";
-
 void IpcServer::start() {
-    running_ = true;
-    thread_ = std::thread(&IpcServer::loop, this);
-}
-
-void IpcServer::stop() {
-    if (!running_.exchange(false)) return;
-    // Wake the blocking ConnectNamedPipe.
-    HANDLE h = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (thread_.joinable()) thread_.join();
-}
-
-void IpcServer::loop() {
     // Only this user, and never over the network.
-    PSECURITY_DESCRIPTOR sd = nullptr;
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
     HANDLE token = nullptr;
     OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token);
     std::vector<BYTE> tu(256);
@@ -105,56 +88,104 @@ void IpcServer::loop() {
     if (token && GetTokenInformation(token, TokenUser, tu.data(), static_cast<DWORD>(tu.size()), &got) &&
         ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(tu.data())->User.Sid, &sid)) {
         std::wstring sddl = std::wstring(L"D:P(A;;GA;;;") + sid + L")";
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr);
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &securityDescriptor_, nullptr);
         LocalFree(sid);
     }
     if (token) CloseHandle(token);
-    sa.lpSecurityDescriptor = sd;
-    if (!sd) {
+    if (!securityDescriptor_) {
         // The default DACL would admit more than this user, so refuse to serve at all.
         logf("ipc: cannot build pipe security; console channel disabled");
         return;
     }
+    securityAttributes_ = {sizeof(securityAttributes_), securityDescriptor_, FALSE};
+    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    running_ = true;
+    for (int i = 0; i < kMaxClients; ++i) workers_.emplace_back(&IpcServer::worker, this, &securityAttributes_);
+}
 
-    bool first = true;
+void IpcServer::stop() {
+    if (!running_.exchange(false)) return;
+    // Every wait below includes this event, so a connected console cannot hold up exit.
+    SetEvent(stopEvent_);
+    for (auto& t : workers_) t.join();
+    workers_.clear();
+    CloseHandle(stopEvent_);
+    stopEvent_ = nullptr;
+    LocalFree(securityDescriptor_);
+    securityDescriptor_ = nullptr;
+}
+
+bool IpcServer::waitIo(HANDLE pipe, OVERLAPPED& ov, DWORD* transferred) {
+    HANDLE events[2] = {ov.hEvent, stopEvent_};
+    if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0) {
+        CancelIoEx(pipe, &ov);
+        DWORD ignored = 0;
+        GetOverlappedResult(pipe, &ov, &ignored, TRUE);
+        return false;
+    }
+    return GetOverlappedResult(pipe, &ov, transferred, FALSE) != FALSE;
+}
+
+void IpcServer::serveClient(HANDLE pipe, HANDLE ioEvent) {
+    std::string pending;
+    char buf[4096];
     while (running_) {
-        DWORD mode = PIPE_ACCESS_DUPLEX | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
-        HANDLE pipe = CreateNamedPipeW(kPipeName, mode,
-                                       PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1,
-                                       65536, 65536, 0, &sa);
+        OVERLAPPED ov{};
+        ov.hEvent = ioEvent;
+        DWORD n = 0;
+        if (!ReadFile(pipe, buf, sizeof(buf), &n, &ov)) {
+            if (GetLastError() != ERROR_IO_PENDING || !waitIo(pipe, ov, &n)) return;
+        }
+        if (n == 0) return;
+        pending.append(buf, n);
+        if (pending.size() > 1024 * 1024) return;
+        size_t nl;
+        while ((nl = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, nl);
+            pending.erase(0, nl + 1);
+            const std::string resp = handler_(line) + "\n";
+            OVERLAPPED wov{};
+            wov.hEvent = ioEvent;
+            DWORD w = 0;
+            if (!WriteFile(pipe, resp.data(), static_cast<DWORD>(resp.size()), &w, &wov)) {
+                if (GetLastError() != ERROR_IO_PENDING || !waitIo(pipe, wov, &w)) return;
+            }
+        }
+    }
+}
+
+void IpcServer::worker(SECURITY_ATTRIBUTES* sa) {
+    const std::wstring path = LR"(\\.\pipe\)" + pipeName_;
+    HANDLE ioEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    while (running_) {
+        HANDLE pipe = CreateNamedPipeW(path.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                       PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                       kMaxClients, 65536, 65536, 0, sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             logf("ipc: CreateNamedPipe failed: %lu", GetLastError());
-            if (first) break;  // another host instance owns the pipe
-            Sleep(200);
+            WaitForSingleObject(stopEvent_, 1000);
             continue;
         }
-        first = false;
-        BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-        std::string pending;
-        char buf[4096];
-        while (connected && running_) {
-            DWORD n = 0;
-            if (!ReadFile(pipe, buf, sizeof(buf), &n, nullptr) || n == 0) break;
-            pending.append(buf, n);
-            if (pending.size() > 1024 * 1024) break;
-            size_t nl;
-            bool failed = false;
-            while ((nl = pending.find('\n')) != std::string::npos) {
-                std::string line = pending.substr(0, nl);
-                pending.erase(0, nl + 1);
-                std::string resp = handler_(line) + "\n";
-                DWORD w = 0;
-                if (!WriteFile(pipe, resp.data(), static_cast<DWORD>(resp.size()), &w, nullptr)) {
-                    failed = true;
-                    break;
-                }
+        OVERLAPPED ov{};
+        ov.hEvent = ioEvent;
+        ResetEvent(ioEvent);
+        bool connected = false;
+        if (ConnectNamedPipe(pipe, &ov)) {
+            connected = true;
+        } else {
+            const DWORD e = GetLastError();
+            if (e == ERROR_PIPE_CONNECTED) {
+                connected = true;
+            } else if (e == ERROR_IO_PENDING) {
+                DWORD ignored = 0;
+                connected = waitIo(pipe, ov, &ignored);
             }
-            if (failed) break;
         }
+        if (connected) serveClient(pipe, ioEvent);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
     }
-    LocalFree(sd);
+    CloseHandle(ioEvent);
 }
 
 }  // namespace sd

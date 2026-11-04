@@ -17,9 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -47,9 +45,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.sidedroid.design.Choice
-import com.sidedroid.design.ChoiceRow
 import com.sidedroid.design.DiscoveredHost
+import com.sidedroid.design.DisplayOptionsUi
+import com.sidedroid.design.DisplaySettings
+import com.sidedroid.design.DisplayValue
 import com.sidedroid.design.PairingDialog
 import com.sidedroid.design.PhoneHomeScreen
 import com.sidedroid.design.PhoneHomeState
@@ -75,17 +74,24 @@ class MainActivity : ComponentActivity() {
     private var connecting by mutableStateOf(false)
     private var config by mutableStateOf<StreamConfig?>(null)
     private var usedUsb by mutableStateOf(true)
+    private var options by mutableStateOf(DisplayOptionsUi())
 
     private data class StreamConfig(
         val displayW: Int, val displayH: Int, val encodeW: Int, val encodeH: Int, val fps: Int, val kbps: Int,
-        val mirror: Boolean, val manualW: Int, val manualH: Int, val manualHz: Int,
+        val mirror: Boolean, val manualW: Int, val manualH: Int, val manualHz: Int, val manualScale: Int,
     )
 
     private val listener = object : NativeBridge.Listener {
-        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int) {
+        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int, manualScale: Int) {
             runOnUiThread {
-                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps, mirror, manualW, manualH, manualHz)
+                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps, mirror, manualW, manualH, manualHz, manualScale)
                 applyPanelRate(fps)
+            }
+        }
+        override fun onDisplayOptions(phoneW: Int, phoneH: Int, pcW: Int, pcH: Int, recommendedScale: Int, currentScale: Int, resolutions: IntArray) {
+            val sizes = resolutions.toList().chunked(2).filter { it.size == 2 }.map { it[0] to it[1] }
+            runOnUiThread {
+                options = DisplayOptionsUi(phoneW to phoneH, pcW to pcH, sizes, DeviceInfo.refreshRates(this@MainActivity).toList(), recommendedScale, currentScale)
             }
         }
         override fun onDisconnected(reason: String) {
@@ -177,6 +183,11 @@ class MainActivity : ComponentActivity() {
         WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
         window.attributes = window.attributes.apply { preferredDisplayModeId = 0 }
         discovery.start()
+    }
+
+    private fun panelRatio(): Float {
+        val (w, h) = DeviceInfo.panelSize(this)
+        return w.toFloat() / h.coerceAtLeast(1)
     }
 
     private fun applyPanelRate(fps: Int) {
@@ -311,7 +322,8 @@ class MainActivity : ComponentActivity() {
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             val ratio = cfg?.let { it.displayW.toFloat() / it.displayH }
             AndroidView(
-                modifier = if (ratio != null) Modifier.aspectRatio(ratio) else Modifier.fillMaxSize(),
+                // Letterboxed within the panel, whichever side the picture is narrower on.
+                modifier = if (ratio != null) Modifier.aspectRatio(ratio, matchHeightConstraintsFirst = ratio < panelRatio()) else Modifier.fillMaxSize(),
                 factory = { ctx ->
                     SurfaceView(ctx).apply {
                         holder.addCallback(object : SurfaceHolder.Callback {
@@ -343,7 +355,6 @@ class MainActivity : ComponentActivity() {
                     },
             )
 
-            val rates = remember { DeviceInfo.refreshRates(this@MainActivity) }
             StreamOverlay(
                 info = cfg?.let {
                     StreamInfo("${it.encodeW}×${it.encodeH}", it.fps, "%.0f Mbps".format(it.kbps / 1000.0), if (usedUsb) "USB" else "Wi-Fi", rttMs)
@@ -355,30 +366,11 @@ class MainActivity : ComponentActivity() {
                 onDisconnect = { leaveStream(null) },
             ) {
                 // Shown from what the PC reports, so both sides always agree.
-                val mirror = cfg?.mirror ?: false
-                val hz = cfg?.manualHz ?: 0
-                val res = (cfg?.manualW ?: 0) to (cfg?.manualH ?: 0)
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    ChoiceRow(
-                        "模式",
-                        listOf(Choice("副屏", false), Choice("镜像", true)),
-                        mirror,
-                        { NativeBridge.sendSetDisplay(res.first, res.second, hz, it) },
-                    )
-                    ChoiceRow(
-                        "分辨率",
-                        listOf(Choice("自适应", 0 to 0), Choice("1080p", 1920 to 1080), Choice("1440p", 2560 to 1440)),
-                        res,
-                        { NativeBridge.sendSetDisplay(it.first, it.second, hz, mirror) },
-                        enabled = !mirror,
-                    )
-                    ChoiceRow(
-                        "刷新率",
-                        listOf(Choice("自动", 0)) + rates.map { Choice("$it", it) },
-                        hz,
-                        { NativeBridge.sendSetDisplay(res.first, res.second, it, mirror) },
-                    )
-                }
+                DisplaySettings(
+                    options,
+                    DisplayValue(cfg?.mirror ?: false, cfg?.manualW ?: 0, cfg?.manualH ?: 0, cfg?.manualHz ?: 0, cfg?.manualScale ?: 0),
+                    onChange = { NativeBridge.sendSetDisplay(it.width, it.height, it.hz, it.mirror, it.scale) },
+                )
             }
         }
     }

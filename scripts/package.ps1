@@ -1,7 +1,7 @@
 # Builds the release: host, console, Android APK and the MSI, into out\.
 # Windows parts build here; the APK builds inside WSL, where the Android SDK lives.
 param(
-    [string]$Version = '0.2.0',
+    [string]$Version = '0.0.1',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
     [switch]$SkipApk
 )
@@ -62,6 +62,7 @@ if ($code -ne 0) { throw "console build failed ($code)" }
 Copy-Item "$root\ui\console\build\compose\binaries\main\app\SideDroid" "$dist\console" -Recurse
 
 Copy-Item "$root\docs\THIRD_PARTY.md" "$dist\THIRD_PARTY.md"
+Copy-Item "$root\LICENSE" "$dist\LICENSE.txt"
 
 if (-not $SkipApk) {
     Write-Host '== Android (in WSL)'

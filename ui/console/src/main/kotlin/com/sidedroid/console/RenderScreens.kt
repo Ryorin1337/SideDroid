@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -14,9 +15,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.use
-import com.sidedroid.design.Choice
-import com.sidedroid.design.ChoiceRow
+import com.sidedroid.design.AboutDialog
 import com.sidedroid.design.DiscoveredHost
+import com.sidedroid.design.DisplayOptionsUi
+import com.sidedroid.design.DisplaySettings
+import com.sidedroid.design.DisplayValue
+import com.sidedroid.design.SectionCard
 import com.sidedroid.design.PairingDialog
 import com.sidedroid.design.PhoneHomeScreen
 import com.sidedroid.design.PhoneHomeState
@@ -42,10 +46,19 @@ private fun render(out: File, name: String, w: Int, h: Int, dark: Boolean, conte
     }
 }
 
+private val sampleOptions = DisplayOptionsUi(
+    phone = 3168 to 1440,
+    pc = 2560 to 1600,
+    resolutions = listOf(2560 to 1600, 2560 to 1440, 1920 to 1200, 1920 to 1080, 1600 to 900, 1366 to 768, 1280 to 720),
+    rates = listOf(60, 90, 120),
+    recommendedScale = 225,
+    currentScale = 225,
+)
+
 private val connected = HostStatus(
     reachable = true, connected = true, device = "Pixel 9 Pro", transport = "usb", encoder = "NVENC", codec = "HEVC",
     displayW = 2992, displayH = 1344, hz = 120, encodeW = 2992, encodeH = 1344, fps = 120, kbps = 42000, rttMs = 3, measuredFps = 118.0,
-    settings = HostSettings(hz = 0), usbCount = 1,
+    settings = HostSettings(hz = 0), usbCount = 1, options = sampleOptions,
     paired = listOf(PairedDevice("a", "Pixel 9 Pro"), PairedDevice("b", "Galaxy Tab S9")),
 )
 
@@ -53,7 +66,7 @@ private val connected = HostStatus(
 private fun Console(status: HostStatus) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            TitleRow({}, {})
+            TitleRow({}, {}, {})
             ConsoleScreen(status, ConsoleActions())
         }
     }
@@ -72,14 +85,29 @@ fun main(args: Array<String>) {
             DiscoveredHost("RYAN-LAPTOP", "192.168.1.23", 27183, true),
             DiscoveredHost("OFFICE-PC", "192.168.1.40", 27183, false),
         )
-        render(out, "phone-home", 400, 860, dark) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-                PhoneHomeScreen(PhoneHomeState(hosts = hosts), {}, {}, {})
+        // Phone portrait and landscape, a foldable, and tablets both ways.
+        val sizes = listOf("phone" to (400 to 860), "phone-land" to (860 to 400), "fold" to (673 to 841), "tablet" to (800 to 1280), "tablet-land" to (1280 to 800))
+        for ((name, size) in sizes) {
+            render(out, "home-$name", size.first, size.second, dark) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                    PhoneHomeScreen(PhoneHomeState(hosts = hosts), {}, {}, {})
+                }
+            }
+            render(out, "stream-$name", size.first, size.second, dark) {
+                Box(Modifier.fillMaxSize()) {
+                    Surface(Modifier.fillMaxSize(), color = Color(0xFF303846)) {}
+                    StreamOverlay(
+                        StreamInfo("3168\u00D71440", 120, "42 Mbps", "USB", 3),
+                        toolbarOpen = true, settingsOpen = true, {}, {}, {},
+                    ) {
+                        DisplaySettings(sampleOptions, DisplayValue(), onChange = {})
+                    }
+                }
             }
         }
         render(out, "phone-error", 400, 860, dark) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-                PhoneHomeScreen(PhoneHomeState(error = "电脑上的 SideDroid 没有响应"), {}, {}, {})
+                PhoneHomeScreen(PhoneHomeState(error = "\u7535\u8111\u4E0A\u7684 SideDroid \u6CA1\u6709\u54CD\u5E94"), {}, {}, {})
             }
         }
         render(out, "phone-pair", 400, 860, dark) {
@@ -88,14 +116,27 @@ fun main(args: Array<String>) {
                 PairingDialog("RYAN-LAPTOP", wrongCode = true, {}, {})
             }
         }
-        render(out, "phone-stream", 860, 400, dark) {
-            Box(Modifier.fillMaxSize()) {
-                Surface(Modifier.fillMaxSize(), color = Color(0xFF303846)) {}
-                StreamOverlay(
-                    StreamInfo("2992×1344", 120, "42 Mbps", "USB", 3),
-                    toolbarOpen = true, settingsOpen = true, {}, {}, {},
-                ) {
-                    ChoiceRow("刷新率", listOf(Choice("60", 60), Choice("90", 90), Choice("120", 120)), 120, {})
+        render(out, "console-about", 460, 860, dark) {
+            Console(connected)
+            AboutDialog(onDismiss = {})
+        }
+        render(out, "phone-about", 400, 860, dark) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                PhoneHomeScreen(PhoneHomeState(hosts = hosts), {}, {}, {})
+                AboutDialog(onDismiss = {})
+            }
+        }
+        render(out, "console-resolution-open", 460, 860, dark) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.padding(20.dp)) {
+                    SectionCard { DisplaySettings(sampleOptions, DisplayValue(), onChange = {}, showQuality = true, openRow = "resolution") }
+                }
+            }
+        }
+        render(out, "console-scale-open", 460, 860, dark) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.padding(20.dp)) {
+                    SectionCard { DisplaySettings(sampleOptions, DisplayValue(), onChange = {}, showQuality = true, openRow = "scale") }
                 }
             }
         }

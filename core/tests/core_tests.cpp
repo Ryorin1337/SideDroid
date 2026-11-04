@@ -49,6 +49,17 @@ static void testWire() {
     tb[3] = 9;  // invalid action
     CHECK(!decodeTouch(Reader(tb.data() + 1, tb.size() - 1)).has_value());
 
+    DisplayOptions opt;
+    opt.phone = {3168, 1440};
+    opt.pc = {2560, 1600};
+    opt.recommendedScale = 225;
+    opt.currentScale = 150;
+    opt.resolutions = {{1920, 1080}, {1280, 720}};
+    auto ob = encode(opt);
+    auto od = decodeDisplayOptions(Reader(ob.data() + 1, ob.size() - 1));
+    CHECK(od && od->phone.width == 3168 && od->currentScale == 150 && od->resolutions.size() == 2 && od->resolutions[1].height == 720);
+    for (size_t n = 1; n < ob.size(); ++n) CHECK(!decodeDisplayOptions(Reader(ob.data() + 1, n - 1)).has_value());
+
     uint8_t payload[] = {1, 2, 3};
     FrameHeader fh{7, 123456789012ull, true};
     auto fb = encodeFrame(fh, payload, 3);

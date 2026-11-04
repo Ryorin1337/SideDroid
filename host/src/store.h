@@ -23,6 +23,7 @@ struct Settings {
     uint32_t maxKbps = 0; // 0 = automatic
     bool allowWireless = true;
     bool mirror = false;  // show the main display instead of an extended one
+    uint16_t scalePercent = 0;  // display scaling of the virtual display, 0 = recommended
 };
 
 class Store {

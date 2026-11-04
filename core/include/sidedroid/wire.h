@@ -11,7 +11,7 @@ namespace sd {
 
 using Bytes = std::vector<uint8_t>;
 
-constexpr uint16_t kProtocolVersion = 2;
+constexpr uint16_t kProtocolVersion = 3;
 constexpr uint16_t kDefaultPort = 27183;
 
 class Writer {
@@ -92,6 +92,7 @@ enum class MsgType : uint8_t {
     UdpSetup = 11,
     Bye = 12,
     Viewport = 13,
+    DisplayOptions = 14,
 };
 
 enum Codec : uint8_t { kCodecH264 = 1, kCodecHevc = 2 };
@@ -134,6 +135,7 @@ struct Config {
     uint16_t manualWidth = 0;
     uint16_t manualHeight = 0;
     uint16_t manualHz = 0;
+    uint16_t manualScale = 0;  // percent, 0 means the recommended one
 };
 
 struct FrameHeader {
@@ -167,6 +169,9 @@ struct TouchPoint {
 
 constexpr uint32_t kKeepBitrate = 0xFFFFFFFF;
 constexpr uint8_t kMirrorOff = 0, kMirrorOn = 1, kMirrorKeep = 2;
+constexpr uint16_t kKeepScale = 0xFFFF;
+// In place of a width and height: use the size of the PC's main display.
+constexpr uint16_t kResolutionMatchPc = 0xFFFF;
 
 // Either side asks for a display mode. width/height 0 means automatic.
 struct SetDisplay {
@@ -175,6 +180,22 @@ struct SetDisplay {
     uint16_t hz = 0;
     uint32_t maxBitrateKbps = 0;  // 0 means automatic, kKeepBitrate leaves it alone
     uint8_t mirror = kMirrorKeep;
+    uint16_t scale = kKeepScale;  // percent, 0 means the recommended one
+};
+
+struct Size {
+    uint16_t width = 0;
+    uint16_t height = 0;
+    bool operator==(const Size& o) const { return width == o.width && height == o.height; }
+};
+
+// Host -> client: what the display settings can be set to right now.
+struct DisplayOptions {
+    Size phone;
+    Size pc;
+    uint16_t recommendedScale = 100;
+    uint16_t currentScale = 100;
+    std::vector<Size> resolutions;
 };
 
 // Client -> host: orientation or window size changed.
@@ -203,6 +224,7 @@ Bytes encode(const SetDisplay&);
 Bytes encode(const Viewport&);
 Bytes encode(const Nack&);
 Bytes encode(const UdpSetup&);
+Bytes encode(const DisplayOptions&);
 Bytes encodePing(MsgType pingOrPong, uint64_t timeUs);
 Bytes encodeSimple(MsgType);
 
@@ -215,6 +237,7 @@ std::optional<SetDisplay> decodeSetDisplay(Reader in);
 std::optional<Viewport> decodeViewport(Reader in);
 std::optional<Nack> decodeNack(Reader in);
 std::optional<UdpSetup> decodeUdpSetup(Reader in);
+std::optional<DisplayOptions> decodeDisplayOptions(Reader in);
 // On success `payload`/`payloadSize` point into the buffer behind `in`.
 bool decodeFrame(Reader in, FrameHeader& hdr, const uint8_t*& payload, size_t& payloadSize);
 

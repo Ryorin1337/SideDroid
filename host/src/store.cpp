@@ -95,6 +95,7 @@ void Store::load() {
             else if (key == "maxKbps") settings_.maxKbps = static_cast<uint32_t>(v);
             else if (key == "allowWireless") settings_.allowWireless = v != 0;
             else if (key == "mirror") settings_.mirror = v != 0;
+            else if (key == "scale") settings_.scalePercent = static_cast<uint16_t>(v);
         }
     }
 }
@@ -120,7 +121,8 @@ void Store::savePaired() {
 void Store::saveSettings() {
     std::ostringstream ss;
     ss << "width=" << settings_.width << "\nheight=" << settings_.height << "\nhz=" << settings_.hz
-       << "\nmaxKbps=" << settings_.maxKbps << "\nallowWireless=" << (settings_.allowWireless ? 1 : 0) << "\nmirror=" << (settings_.mirror ? 1 : 0) << "\n";
+       << "\nmaxKbps=" << settings_.maxKbps << "\nallowWireless=" << (settings_.allowWireless ? 1 : 0) << "\nmirror=" << (settings_.mirror ? 1 : 0)
+       << "\nscale=" << settings_.scalePercent << "\n";
     auto s = ss.str();
     if (!writeFile(settingsPath(), s.data(), s.size())) logf("cannot save settings");
 }

@@ -17,7 +17,7 @@ function Run-Case($name, $clientArgs, $secs, $ext, [scriptblock]$check) {
     $o = & "$Bin\sd-loopback.exe" --port 27190 --seconds $secs --out $f @clientArgs
     $h.WaitForExit(($secs + 8) * 1000) | Out-Null
     $o | Select-String 'config:|RESULT' | ForEach-Object { $_.Line }
-    $series = ($o | Select-String 't=').Line | ForEach-Object { ($_ -replace '^t=\s*(\d+)s\s+(\d+) kbps.*', '$2') }
+    $series = ($o | Select-String '^t=').Line | ForEach-Object { ($_ -replace '^t=\s*(\d+)s\s+(\d+) kbps.*', '$2') }
     Write-Output ("kbps/s: " + ($series -join ' '))
     $probe = & ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=codec_name,width,height,nb_read_frames -of csv=p=0 $f 2>&1 | Select-Object -Last 1
     Write-Output "ffprobe: $probe"

@@ -1,5 +1,7 @@
 # Third-party components
 
+SideDroid itself is under the MIT licence, see LICENSE. It includes:
+
 | Component | Use | Licence |
 |---|---|---|
 | [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) 25.7.23 | Virtual monitor, bundled unmodified | MIT, see driver/LICENSE.txt |
