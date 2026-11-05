@@ -23,6 +23,7 @@
 - **多点触控：** 在手机上直接操作 Windows。
 - **自适应码率：** 网络变差时先降码率，再降帧率和清晰度，恢复后自动回升。
 - **硬件编解码：** 支持 NVENC 和 Media Foundation（Intel、AMD），HEVC 和 H.264。
+- **自动检查更新：** 有新版本时提示，确认后下载、校验并调用系统安装程序。
 - **Material 3 Expressive：** 电脑和手机用同一套设计，支持深色模式，手机界面适配平板和折叠屏。
 
 ## 截图
@@ -71,7 +72,7 @@ MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应�
 
 ## 当前状态
 
-这是早期版本（0.0.1），目前只在一台 NVIDIA 显卡的笔记本上测试过。以下情况还没有充分验证：
+这是早期版本（0.0.2），目前只在一台 NVIDIA 显卡的笔记本上测试过。以下情况还没有充分验证：
 
 - Intel、AMD 显卡的编码路径
 - 真实 Wi-Fi 环境下的长时间使用
@@ -104,6 +105,15 @@ MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应�
 | `installer/` | MSI 安装包定义 |
 
 协议细节见 [docs/protocol.md](docs/protocol.md)。
+
+## 发布新版本
+
+1. 改版本号：`CMakeLists.txt`、`android/app/build.gradle.kts`（`versionCode` 也要加一）、`ui/console/build.gradle.kts`、`ui/design/.../About.kt` 和 `package.ps1` 的默认值。
+2. 运行 `.\scripts\package.ps1 -Notes "更新说明"`。
+3. 提交、打标签 `v<版本号>`，把 `out\` 里的 MSI、APK 和 `SHA256SUMS.txt` 发布到 Release。
+4. **Release 公开后**，把 `out\update.json` 复制到仓库根目录，提交并推送。用户的客户端读到它就会提示更新，所以顺序不能反，否则用户会下载失败。
+
+电脑端每 12 小时、手机端每次启动时读取一次 `update.json`。其中只有版本号、说明和各文件的 SHA-256，下载地址固定为这个仓库的 Release。
 
 ## 致谢和许可
 

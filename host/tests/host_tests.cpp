@@ -7,6 +7,7 @@
 #include "input.h"
 #include "ipc.h"
 #include "topology.h"
+#include "updater.h"
 
 using namespace sd;
 
@@ -165,6 +166,98 @@ static void testTouchMap() {
     CHECK(d.x == -1080 && d.y == 2199);
 }
 
+static void testPlaceDisplay() {
+    const RECT main{0, 0, 2560, 1600};
+    const std::vector<RECT> others{main};
+    auto at = [](POINT p, LONG x, LONG y) { return p.x == x && p.y == y; };
+
+    // First time, with nothing known: right of everything, top aligned.
+    CHECK(at(placeDisplay(nullptr, 1920, 1080, others), 2560, 0));
+
+    // Right of the main display, wherever along its edge the user put it.
+    RECT right{2560, 200, 2560 + 1920, 200 + 1080};
+    CHECK(at(placeDisplay(&right, 1920, 1080, others), 2560, 200));
+    CHECK(at(placeDisplay(&right, 2400, 1200, others), 2560, 200));
+
+    // Left of it: it grows and shrinks away from the display it touches.
+    RECT left{-1920, 100, 0, 100 + 1080};
+    CHECK(at(placeDisplay(&left, 1920, 1080, others), -1920, 100));
+    CHECK(at(placeDisplay(&left, 2400, 1200, others), -2400, 100));
+    CHECK(at(placeDisplay(&left, 1280, 720, others), -1280, 100));
+
+    // Above it, the same.
+    RECT above{300, -1080, 300 + 1920, 0};
+    CHECK(at(placeDisplay(&above, 2400, 1200, others), 300, -1200));
+
+    // Below it.
+    RECT below{300, 1600, 300 + 1920, 1600 + 1080};
+    CHECK(at(placeDisplay(&below, 2400, 1200, others), 300, 1600));
+
+    // Turned to landscape, a tall display high above the edge would float: it slides back.
+    RECT tall{-1080, -1500, 0, -1500 + 2400};
+    CHECK(at(placeDisplay(&tall, 1920, 1080, others), -1920, 0));
+
+    // A place that no longer works, because the display it touched has gone.
+    RECT stale{5000, 0, 5000 + 1920, 1080};
+    CHECK(at(placeDisplay(&stale, 1920, 1080, others), 2560, 0));
+    // A place now taken by another display.
+    RECT taken{100, 100, 2020, 1180};
+    CHECK(at(placeDisplay(&taken, 1920, 1080, others), 2560, 0));
+
+    // Growing into a third display is not possible, so it moves to a free side.
+    const std::vector<RECT> two{main, RECT{2560, 0, 2560 + 1000, 1000}};
+    RECT between{2560, 1000, 2560 + 1000, 1000 + 600};
+    CHECK(at(placeDisplay(&between, 1000, 600, two), 2560, 1000));
+    RECT squeezed{-1000, 0, 0, 800};
+    CHECK(at(placeDisplay(&squeezed, 1400, 800, two), -1400, 0));
+
+    // Alone on the desktop, it stays put.
+    CHECK(at(placeDisplay(&right, 1920, 1080, {}), 2560, 200));
+}
+
+static void testUpdateManifest() {
+    CHECK(compareVersions("0.0.2", "0.0.1") > 0);
+    CHECK(compareVersions("0.0.1", "0.0.2") < 0);
+    CHECK(compareVersions("0.0.2", "0.0.2") == 0);
+    CHECK(compareVersions("0.0.10", "0.0.9") > 0);
+    CHECK(compareVersions("0.1", "0.0.9") > 0);
+    CHECK(compareVersions("1.0", "1.0.0") == 0);
+
+    CHECK(isValidVersion("0.0.2"));
+    CHECK(isValidVersion("1.2.3.4"));
+    CHECK(!isValidVersion(""));
+    CHECK(!isValidVersion("1..2"));
+    CHECK(!isValidVersion("1.2."));
+    CHECK(!isValidVersion("1.2.3.4.5"));
+    CHECK(!isValidVersion("../../evil"));
+    CHECK(!isValidVersion("1.2/x"));
+
+    const std::string sha(64, 'a');
+    auto m = parseUpdateManifest("{\n  \"version\": \"0.0.2\",\n  \"notes\": \"修复\\n第二行\",\n  \"msi\": \"" + sha + "\"\n}\n");
+    CHECK(m.has_value());
+    if (m) {
+        CHECK(m->version == "0.0.2");
+        CHECK(m->notes == "修复\n第二行");
+        CHECK(m->msiSha256 == sha);
+    }
+    // Upper case checksums, as Windows' own tools print them.
+    m = parseUpdateManifest("{\"version\":\"0.0.2\",\"msi\":\"" + std::string(64, 'A') + "\"}");
+    CHECK(m && m->msiSha256 == sha);
+
+    CHECK(!parseUpdateManifest("").has_value());
+    CHECK(!parseUpdateManifest("<html>Not Found</html>").has_value());
+    CHECK(!parseUpdateManifest("{\"version\":\"0.0.2\"}").has_value());
+    CHECK(!parseUpdateManifest("{\"version\":\"0.0.2\",\"msi\":\"abc\"}").has_value());
+    CHECK(!parseUpdateManifest("{\"version\":\"0.0.2\",\"msi\":\"" + std::string(64, 'z') + "\"}").has_value());
+    CHECK(!parseUpdateManifest("{\"version\":\"../x\",\"msi\":\"" + sha + "\"}").has_value());
+
+    // Long notes are cut between characters, not inside one.
+    std::string longNotes;
+    for (int i = 0; i < 2000; ++i) longNotes += "修";
+    m = parseUpdateManifest("{\"version\":\"0.0.2\",\"notes\":\"" + longNotes + "\",\"msi\":\"" + sha + "\"}");
+    CHECK(m && m->notes.size() <= 4000 && m->notes.size() % 3 == 0);
+}
+
 static void testTouchDevice() {
     // Creates a real synthetic touch device, without injecting anything.
     TouchInjector t;
@@ -256,6 +349,8 @@ int main() {
     testChooseMode();
     testVddXml();
     testTouchMap();
+    testPlaceDisplay();
+    testUpdateManifest();
     testTouchDevice();
     testLayoutEdit();
     testAdb();

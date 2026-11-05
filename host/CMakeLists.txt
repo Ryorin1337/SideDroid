@@ -11,15 +11,17 @@ set(HOST_COMMON
     src/adb.cpp
     src/discovery.cpp
     src/host.cpp
+    src/updater.cpp
 )
 
 add_library(sidedroid_host_lib STATIC ${HOST_COMMON})
 target_include_directories(sidedroid_host_lib PUBLIC src PRIVATE third_party/nvenc)
 target_link_libraries(sidedroid_host_lib PUBLIC
     sidedroid_core d3d11 dxgi dxguid d3dcompiler mfplat mfuuid mf
-    crypt32 dnsapi iphlpapi user32 gdi32 shell32 ole32 advapi32)
+    crypt32 dnsapi iphlpapi user32 gdi32 shell32 ole32 advapi32 winhttp bcrypt)
 target_compile_definitions(sidedroid_host_lib PUBLIC
-    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+    WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00
+    SIDEDROID_VERSION="${PROJECT_VERSION}")
 
 add_executable(sidedroid-host WIN32 src/main.cpp resources/host.rc)
 target_link_libraries(sidedroid-host PRIVATE sidedroid_host_lib)

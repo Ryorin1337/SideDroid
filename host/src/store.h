@@ -24,6 +24,8 @@ struct Settings {
     bool allowWireless = true;
     bool mirror = false;  // show the main display instead of an extended one
     uint16_t scalePercent = 0;  // display scaling of the virtual display, 0 = recommended
+    // Where the virtual display last was on the desktop. All zero until it has been shown.
+    int vddLeft = 0, vddTop = 0, vddRight = 0, vddBottom = 0;
 };
 
 class Store {
@@ -36,6 +38,7 @@ public:
 
     Settings settings();
     void setSettings(const Settings& s);
+    void setVddRect(int left, int top, int right, int bottom);
 
 private:
     void savePaired();

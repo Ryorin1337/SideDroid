@@ -23,7 +23,7 @@ constexpr UINT_PTR kTooltipTimer = 1;
 constexpr UINT kTooltipIntervalMs = 2000;
 
 enum MenuId : UINT {
-    ID_OPEN = 1, ID_EXIT, ID_DISCONNECT, ID_WIRELESS, ID_PAIR, ID_INSTALL_DRIVER,
+    ID_OPEN = 1, ID_EXIT, ID_DISCONNECT, ID_WIRELESS, ID_PAIR, ID_INSTALL_DRIVER, ID_INSTALL_UPDATE,
     ID_MODE_EXTEND = 10, ID_MODE_MIRROR,
     ID_RES_PHONE = 20, ID_RES_PC,
     ID_RES_BASE = 30,      // up to 40 sizes
@@ -105,6 +105,20 @@ void updateTooltip() {
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
+// Says so once per version. Clicking it opens the console, which has the details.
+void announceUpdate() {
+    static std::string announced;
+    const UpdateStatus u = g_host->updateStatus();
+    if (u.state != "available" || u.version == announced) return;
+    announced = u.version;
+    NOTIFYICONDATAW n = g_nid;
+    n.uFlags = NIF_INFO;
+    lstrcpynW(n.szInfoTitle, L"SideDroid 有新版本", ARRAYSIZE(n.szInfoTitle));
+    lstrcpynW(n.szInfo, format(L"版本 %s，点击查看", widen(u.version).c_str()).c_str(), ARRAYSIZE(n.szInfo));
+    n.dwInfoFlags = NIIF_INFO;
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+}
+
 void addRadio(HMENU menu, UINT id, const wchar_t* label, bool checked, bool enabled = true) {
     UINT flags = MF_STRING | (checked ? MF_CHECKED : 0) | (enabled ? 0 : MF_GRAYED);
     AppendMenuW(menu, flags, id, label);
@@ -167,6 +181,11 @@ void showMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING | (l.connected ? 0 : MF_GRAYED), ID_DISCONNECT, L"断开连接");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const UpdateStatus update = g_host->updateStatus();
+    if (update.state == "available" || update.state == "failed")
+        AppendMenuW(menu, MF_STRING, ID_INSTALL_UPDATE, format(L"安装新版本 %s", widen(update.version).c_str()).c_str());
+    else if (update.state == "downloading")
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, format(L"正在下载新版本 %d%%", update.progress).c_str());
     AppendMenuW(menu, MF_STRING, ID_OPEN, L"打开控制台");
     AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出");
     SetMenuDefaultItem(menu, ID_OPEN, FALSE);
@@ -188,6 +207,8 @@ void showMenu(HWND hwnd) {
         g_host->disconnectPhone();
     } else if (cmd == ID_INSTALL_DRIVER) {
         g_host->handleCommand(R"({"cmd":"install_driver"})");
+    } else if (cmd == ID_INSTALL_UPDATE) {
+        g_host->installUpdate();
     } else if (cmd == ID_PAIR) {
         // The code is shown in the console, along with its countdown.
         g_host->startPairing();
@@ -231,11 +252,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_TRAY:
-        if (LOWORD(lp) == WM_LBUTTONUP) openConsole();
+        if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == NIN_BALLOONUSERCLICK) openConsole();
         else if (LOWORD(lp) == WM_RBUTTONUP) showMenu(hwnd);
         return 0;
     case WM_TIMER:
-        if (wp == kTooltipTimer) updateTooltip();
+        if (wp == kTooltipTimer) {
+            updateTooltip();
+            announceUpdate();
+        }
         return 0;
     case WM_ENDSESSION:
         // Windows is shutting down: put the desktop back while there is still time.
@@ -307,7 +331,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (a == L"--test-pattern") opts.testPattern = true;
         else if (a == L"--test-virtual-display") opts.useVirtualDisplayInTest = true;
         else if (a == L"--list-outputs") listOnly = true;
+        else if (a == L"--update-test-base" && i + 1 < argc) opts.updateTestBase = argv[++i];
     }
+    // Never on the real port: it would point a real installation at another source.
+    if (opts.port == kDefaultPort) opts.updateTestBase.clear();
     LocalFree(argv);
 
     // Physical pixels everywhere: capture rectangles and injected touch must agree.

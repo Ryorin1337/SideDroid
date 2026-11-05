@@ -32,8 +32,17 @@ std::optional<OutputInfo> findOutputByName(const std::wstring& deviceName);
 std::vector<DisplayMode> listModes(const std::wstring& deviceName);
 bool outputHasMode(const std::wstring& deviceName, const DisplayMode& m);
 
-// Puts the output on the desktop, right of the existing displays, in mode m.
-bool attachOutput(const std::wstring& deviceName, const DisplayMode& m);
+// Current place of an output on the desktop, cheap enough to poll.
+bool outputRect(const std::wstring& deviceName, RECT* out);
+
+// Where a display of the given size goes, given where it was and the displays around
+// it. It stays on the side the user put it: a display left of another keeps touching
+// it as it grows. When that no longer fits, it goes right of everything. Pure, for testing.
+POINT placeDisplay(const RECT* previous, LONG width, LONG height, const std::vector<RECT>& others);
+
+// Puts the output on the desktop in mode m, near `previous` if given, otherwise where
+// it already is. Without either, right of the existing displays.
+bool attachOutput(const std::wstring& deviceName, const DisplayMode& m, const RECT* previous = nullptr);
 
 // Picks what to request from Windows for this device.
 //   manual non-zero fields win; otherwise native size and the fastest rate.

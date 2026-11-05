@@ -1,11 +1,36 @@
 package com.sidedroid.console
 
+import com.sidedroid.design.UpdateStage
+import com.sidedroid.design.UpdateUi
+import com.sidedroid.design.isNewerVersion
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class HostClientTest {
+    @Test
+    fun parsesUpdate() {
+        val u = parseStatus("""{"update":{"state":"downloading","version":"0.0.2","notes":"a\nb","progress":42}}""").update
+        assertEquals(UpdateUi("0.0.2", "a\nb", UpdateStage.Downloading, 42), u)
+        assertEquals(null, parseStatus("""{"update":{"state":"none","version":"","notes":"","progress":0}}""").update)
+        // A host older than the console says nothing about updates.
+        assertEquals(null, parseStatus("""{"ok":true}""").update)
+    }
+
+    @Test
+    fun comparesVersions() {
+        assertTrue(isNewerVersion("0.0.2", "0.0.1"))
+        assertTrue(isNewerVersion("0.0.10", "0.0.9"))
+        assertTrue(isNewerVersion("0.1", "0.0.9"))
+        assertFalse(isNewerVersion("0.0.1", "0.0.2"))
+        assertFalse(isNewerVersion("0.0.2", "0.0.2"))
+        assertFalse(isNewerVersion("1.0", "1.0.0"))
+        assertFalse(isNewerVersion("../x", "0.0.1"))
+        assertFalse(isNewerVersion("", "0.0.1"))
+        assertFalse(isNewerVersion("1.2.3.4.5", "0.0.1"))
+    }
+
     @Test
     fun parsesFullStatus() {
         val s = parseStatus(

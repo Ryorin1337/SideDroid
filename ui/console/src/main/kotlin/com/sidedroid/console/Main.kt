@@ -150,6 +150,7 @@ private fun runConsole(args: Array<String>, instance: String?, single: SingleIns
                             onCancelPairing = { act { client.cancelPairing() } },
                             onUnpair = { id -> act { client.unpair(id) } },
                             onStartService = { act { client.startHost() } },
+                            onInstallUpdate = { act { client.installUpdate() } },
                         ),
                         serviceStopped = serviceStopped,
                         // A host takes well under a second to start. This long means it will not.

@@ -57,6 +57,8 @@ import com.sidedroid.design.SideDroidLight
 import com.sidedroid.design.SideDroidTheme
 import com.sidedroid.design.StreamInfo
 import com.sidedroid.design.StreamOverlay
+import com.sidedroid.design.UpdateStage
+import com.sidedroid.design.UpdateUi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -75,6 +77,10 @@ class MainActivity : ComponentActivity() {
     private var config by mutableStateOf<StreamConfig?>(null)
     private var usedUsb by mutableStateOf(true)
     private var options by mutableStateOf(DisplayOptionsUi())
+    private val updater by lazy { Updater(applicationContext) }
+    private var availableUpdate: Updater.Available? = null
+    private var updateUi by mutableStateOf<UpdateUi?>(null)
+    private var updateChecked = false
 
     private data class StreamConfig(
         val displayW: Int, val displayH: Int, val encodeW: Int, val encodeH: Int, val fps: Int, val kbps: Int,
@@ -221,6 +227,37 @@ class MainActivity : ComponentActivity() {
 
         fun hostKey(h: DiscoveredHost) = h.name
 
+        // Once per launch, and never while a stream is competing for the network.
+        LaunchedEffect(Unit) {
+            if (updateChecked) return@LaunchedEffect
+            updateChecked = true
+            val latest = withContext(Dispatchers.IO) { updater.check() }
+            availableUpdate = latest
+            if (latest != null) updateUi = UpdateUi(latest.version, latest.notes)
+            else withContext(Dispatchers.IO) { updater.deleteDownloads() }
+        }
+
+        fun installUpdate() {
+            val update = availableUpdate ?: return
+            updateUi = updateUi?.copy(stage = UpdateStage.Downloading, progress = 0)
+            scope.launch {
+                val apk = withContext(Dispatchers.IO) {
+                    runCatching {
+                        updater.download(update) { percent ->
+                            runOnUiThread { updateUi = updateUi?.copy(progress = percent) }
+                        }
+                    }.getOrNull()
+                }
+                if (apk == null) {
+                    updateUi = updateUi?.copy(stage = UpdateStage.Failed)
+                    return@launch
+                }
+                // Back to the button afterwards: declining the installer is not an error,
+                // and accepting it replaces this process.
+                updateUi = updateUi?.copy(stage = if (runCatching { updater.install(apk) }.isSuccess) UpdateStage.Available else UpdateStage.Failed)
+            }
+        }
+
         fun attemptWireless(h: DiscoveredHost) {
             val secret = pairing.secretFor(hostKey(h))
             if (secret == null) {
@@ -251,6 +288,7 @@ class MainActivity : ComponentActivity() {
                     hosts = found.map { DiscoveredHost(it.name, it.address, it.port, pairing.secretFor(it.name) != null) },
                     connecting = connecting,
                     error = homeError,
+                    update = updateUi,
                 ),
                 onUsb = {
                     connecting = true
@@ -266,6 +304,7 @@ class MainActivity : ComponentActivity() {
                 onHost = { attemptWireless(it) },
                 onManual = { addr -> attemptWireless(DiscoveredHost(addr, addr, PORT, false)) },
                 modifier = Modifier.safeDrawingPadding(),
+                onInstallUpdate = { installUpdate() },
             )
         }
 

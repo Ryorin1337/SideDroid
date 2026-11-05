@@ -96,6 +96,10 @@ void Store::load() {
             else if (key == "allowWireless") settings_.allowWireless = v != 0;
             else if (key == "mirror") settings_.mirror = v != 0;
             else if (key == "scale") settings_.scalePercent = static_cast<uint16_t>(v);
+            else if (key == "vddLeft") settings_.vddLeft = static_cast<int>(v);
+            else if (key == "vddTop") settings_.vddTop = static_cast<int>(v);
+            else if (key == "vddRight") settings_.vddRight = static_cast<int>(v);
+            else if (key == "vddBottom") settings_.vddBottom = static_cast<int>(v);
         }
     }
 }
@@ -122,7 +126,8 @@ void Store::saveSettings() {
     std::ostringstream ss;
     ss << "width=" << settings_.width << "\nheight=" << settings_.height << "\nhz=" << settings_.hz
        << "\nmaxKbps=" << settings_.maxKbps << "\nallowWireless=" << (settings_.allowWireless ? 1 : 0) << "\nmirror=" << (settings_.mirror ? 1 : 0)
-       << "\nscale=" << settings_.scalePercent << "\n";
+       << "\nscale=" << settings_.scalePercent << "\nvddLeft=" << settings_.vddLeft << "\nvddTop=" << settings_.vddTop
+       << "\nvddRight=" << settings_.vddRight << "\nvddBottom=" << settings_.vddBottom << "\n";
     auto s = ss.str();
     if (!writeFile(settingsPath(), s.data(), s.size())) logf("cannot save settings");
 }
@@ -172,6 +177,16 @@ Settings Store::settings() {
 void Store::setSettings(const Settings& s) {
     std::lock_guard<std::mutex> lock(mutex_);
     settings_ = s;
+    saveSettings();
+}
+
+void Store::setVddRect(int left, int top, int right, int bottom) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (settings_.vddLeft == left && settings_.vddTop == top && settings_.vddRight == right && settings_.vddBottom == bottom) return;
+    settings_.vddLeft = left;
+    settings_.vddTop = top;
+    settings_.vddRight = right;
+    settings_.vddBottom = bottom;
     saveSettings();
 }
 

@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     bool requestKey = false;
     int mirrorAt = -1, extendAt = -1, scaleAt = -1;
     uint16_t scaleTo = 0, density = 160;
+    bool commands = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
@@ -49,6 +50,7 @@ int main(int argc, char** argv) {
         else if (a == "--scale-at") { scaleAt = atoi(next()); scaleTo = static_cast<uint16_t>(atoi(next())); }
         else if (a == "--mirror-at") mirrorAt = atoi(next());
         else if (a == "--extend-at") extendAt = atoi(next());
+        else if (a == "--commands") commands = true;
     }
 
     FILE* out = outPath.empty() ? nullptr : fopen(outPath.c_str(), "wb");
@@ -111,7 +113,38 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    for (int s = 0; s < seconds && !gone; ++s) {
+    // --commands: lets a test script act at the moment it chooses, one line each:
+    //   tap <x> <y>     0..65535 across the display
+    //   size <w> <h>    as the resolution setting does
+    //   quit
+    std::atomic<bool> quit{false};
+    if (commands) {
+        std::thread([&] {
+            char line[128];
+            while (fgets(line, sizeof(line), stdin)) {
+                int a = 0, b = 0;
+                if (sscanf(line, "tap %d %d", &a, &b) == 2) {
+                    TouchPoint p;
+                    p.id = 1;
+                    p.x = static_cast<uint16_t>(a);
+                    p.y = static_cast<uint16_t>(b);
+                    p.pressure = 512;
+                    p.action = TouchAction::Down;
+                    client.sendTouch({p});
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    p.action = TouchAction::Up;
+                    client.sendTouch({p});
+                } else if (sscanf(line, "size %d %d", &a, &b) == 2) {
+                    client.sendSetDisplay(SetDisplay{static_cast<uint16_t>(a), static_cast<uint16_t>(b), 0, kKeepBitrate, kMirrorKeep});
+                } else if (strncmp(line, "quit", 4) == 0) {
+                    quit = true;
+                    return;
+                }
+            }
+        }).detach();
+    }
+
+    for (int s = 0; s < seconds && !gone && !quit; ++s) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         uint64_t b = secondBytes.exchange(0);
         kbpsPerSecond.push_back(b * 8 / 1000);

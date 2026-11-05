@@ -21,6 +21,7 @@
 #include "sidedroid/secure.h"
 #include "store.h"
 #include "topology.h"
+#include "updater.h"
 
 namespace sd {
 
@@ -35,6 +36,8 @@ struct HostOptions {
     bool enableTouch = true;
     bool testPattern = false;  // overlay moving noise on the capture, for bitrate tests
     bool useVirtualDisplayInTest = false;  // full display handling on a test port
+    // Test runs only: look for updates here, and verify them without installing.
+    std::wstring updateTestBase;
 };
 
 class Session;
@@ -78,6 +81,8 @@ public:
     Settings currentSettings() { return store_.settings(); }
     // True when SideDroid installed the driver, so the display is ours to manage.
     bool ownsDriver() const { return ownsDriver_; }
+    UpdateStatus updateStatus() { return updater_ ? updater_->status() : UpdateStatus{}; }
+    bool installUpdate() { return updater_ && updater_->install(); }
 
 private:
     void acceptLoop();
@@ -92,6 +97,7 @@ private:
     AdbWatcher adb_;
     Discovery discovery_;
     std::unique_ptr<IpcServer> ipc_;
+    std::unique_ptr<Updater> updater_;
     Socket listener_;
     int listenFailures_ = 0;
     std::atomic<bool> running_{false};

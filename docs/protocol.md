@@ -89,6 +89,7 @@ H -> C: confirmHost(32)
 通过 Windows CCD API（`QueryDisplayConfig` / `SetDisplayConfig`）管理，实现在 `host/src/topology.cpp`。
 
 - **副屏：** 连接时先保存当前布局，再把虚拟屏放到独立的 source 上。Windows 可能把新显示器放进复制组，那时它和主屏共用一个 source，改模式会同时改到主屏，所以 Host 拒绝修改任何含有真实显示器的输出。
+- **位置：** 用户在 Windows 显示设置里拖动虚拟屏后，Host 约 200ms 内发现新位置，更新触控映射并记下来。改分辨率、刷新率或转动手机时，它留在原来的一侧，贴着原来相邻的显示器；放不下时才移到所有显示器的右边。下次连接时回到记下的位置。
 - **镜像：** 不使用 Windows 的复制模式，直接采集主屏，虚拟屏不上桌面，主屏的任何设置都不变。
 - **恢复：** 手机离开 5 秒后恢复保存的布局，短暂掉线不会让窗口跳来跳去。布局同时写入 `%LOCALAPPDATA%\SideDroid\display-layout-to-restore.bin`，程序崩溃或断电后，下次启动时恢复。
 - **缩放：** 通过 `DisplayConfigSetDeviceInfo` 的未公开类型 -3 和 -4 设置，和 Windows 显示设置里的缩放是同一项，只作用于虚拟屏。推荐值取满足“逻辑尺寸至少 1280×600”且不超过手机自身密度的最大档位。
@@ -106,3 +107,23 @@ H -> C: confirmHost(32)
 | `unpair` | `id` |
 | `disconnect` | 无 |
 | `install_driver` | 无，会触发 UAC |
+| `update_install` | 无，下载并校验新版本，然后启动 Windows Installer |
+
+## 更新
+
+仓库根目录的 `update.json`：
+
+```json
+{
+  "version": "0.0.2",
+  "notes": "更新说明，用 \n 换行",
+  "msi": "SHA-256",
+  "arm64-v8a": "SHA-256",
+  "armeabi-v7a": "SHA-256",
+  "x86_64": "SHA-256"
+}
+```
+
+下载地址由客户端拼出，固定为 `https://github.com/Ryorin1337/SideDroid/releases/download/v<版本>/SideDroid-<版本>-x64.msi`（手机端是 `-android-<ABI>.apk`）。版本号必须是一到四段数字。校验和不一致的文件会被丢弃。
+
+**信任范围：** 校验和和文件都来自同一个 GitHub 账号，所以账号被盗时校验和挡不住恶意 MSI。APK 还有一层保护：Android 只接受同一密钥签名的新版本。

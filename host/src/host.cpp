@@ -18,6 +18,7 @@ constexpr uint64_t kPairingLifetimeUs = 120'000'000;
 constexpr int kPairingMaxAttempts = 5;
 constexpr uint64_t kDetachGraceUs = 5'000'000;
 constexpr uint64_t kIdleKeepAliveUs = 500'000;
+constexpr uint64_t kPlaceCheckUs = 200'000;
 constexpr int kRepeatAfterChange = 6;  // flushes decoders that hold on to a few frames
 constexpr size_t kUdpProbeBytes = 4 + kUdpOverhead;
 constexpr uint64_t kProbeSeqBase = 1ull << 63;
@@ -75,6 +76,7 @@ private:
     std::atomic<bool> keyRequested_{true};
     std::atomic<uint16_t> viewportW_{0}, viewportH_{0};
     uint16_t recommendedScale_ = 100, currentScale_ = 100;  // video thread only
+    bool vddPlaced_ = false;  // video thread only: this session has put the display on the desktop
 
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
@@ -233,6 +235,7 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
 
     if (s.mirror) {
         // Mirroring reads the main display as it is, so nothing about it changes.
+        vddPlaced_ = false;
         host_.restoreLayoutNow();
         for (const auto& o : listOutputs()) {
             if (o.primary) {
@@ -263,6 +266,19 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
     }
     *device = vdd->deviceName;
     *isVirtual = true;
+
+    // While it is showing, the user may have moved it, so where it is now counts.
+    // Coming back onto the desktop, Windows picks a place, so the last known one counts.
+    // Read here, because the driver reload below can put it somewhere else.
+    RECT previous{};
+    bool hasPrevious = false;
+    if (vddPlaced_ && vdd->attached) {
+        previous = vdd->rect;
+        hasPrevious = true;
+    } else if (s.vddRight > s.vddLeft && s.vddBottom > s.vddTop) {
+        previous = {s.vddLeft, s.vddTop, s.vddRight, s.vddBottom};
+        hasPrevious = true;
+    }
 
     if (!outputHasMode(*device, want)) {
         // First sight of this phone's resolution: teach it to the driver.
@@ -297,7 +313,9 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
             *mode = *best;
         }
     }
-    if (!attachOutput(*device, *mode)) return false;
+    if (!attachOutput(*device, *mode, hasPrevious ? &previous : nullptr)) return false;
+    vddPlaced_ = true;
+    if (RECT placed; outputRect(*device, &placed)) host_.store().setVddRect(placed.left, placed.top, placed.right, placed.bottom);
 
     // Before capture starts: a change of scale would interrupt it.
     recommendedScale_ = recommendedScale(mode->width, mode->height, hello_.densityDpi);
@@ -360,10 +378,13 @@ void Session::videoLoop() {
         openFailures = 0;
 
         const int capW = capture.width(), capH = capture.height();
-        if (auto o = findOutputByName(device); o && host_.options().enableTouch) {
+        RECT shownRect{};
+        if (auto o = findOutputByName(device)) {
+            shownRect = o->rect;
             std::lock_guard<std::mutex> lock(touchMutex_);
-            if (touch_) touch_->setDisplayRect(o->rect);
+            if (touch_) touch_->setDisplayRect(shownRect);
         }
+        uint64_t lastPlaceCheckUs = monotonicUs();
 
         // The real rate is what the capture delivers, whatever was requested.
         RateTarget startTarget;
@@ -533,6 +554,23 @@ void Session::videoLoop() {
             }
 
             const uint64_t now = monotonicUs();
+
+            // Moving a display usually interrupts capture, which rebuilds all of this,
+            // but nothing promises that. Touch must not depend on it.
+            if (now - lastPlaceCheckUs >= kPlaceCheckUs) {
+                lastPlaceCheckUs = now;
+                RECT r;
+                if (outputRect(device, &r) && !EqualRect(&r, &shownRect)) {
+                    logf("display moved to %ld,%ld", r.left, r.top);
+                    shownRect = r;
+                    {
+                        std::lock_guard<std::mutex> lock(touchMutex_);
+                        if (touch_) touch_->setDisplayRect(r);
+                    }
+                    if (isVirtual) host_.store().setVddRect(r.left, r.top, r.right, r.bottom);
+                }
+            }
+
             const bool dueByRate = now - lastEncodeUs >= frameIntervalUs * 9 / 10;
             const bool wantRepeat = repeats > 0 && dueByRate;
             const bool keepAlive = now - lastEncodeUs >= kIdleKeepAliveUs;
@@ -851,12 +889,28 @@ bool Host::start() {
         ipc_->start();
     }
     if (opts_.enableDiscovery && store_.settings().allowWireless) discovery_.start(opts_.port);
-    logf("host started on port %d", opts_.port);
+    // Test runs on other ports never touch the real installation.
+    if (opts_.port == kDefaultPort || !opts_.updateTestBase.empty()) {
+        Updater::Config config;
+        config.currentVersion = SIDEDROID_VERSION;
+        if (opts_.updateTestBase.empty()) {
+            config.manifestUrl = L"https://raw.githubusercontent.com/Ryorin1337/SideDroid/main/update.json";
+            config.releaseBase = L"https://github.com/Ryorin1337/SideDroid/releases/download";
+        } else {
+            config.manifestUrl = opts_.updateTestBase + L"/update.json";
+            config.releaseBase = opts_.updateTestBase;
+            config.launchInstaller = false;
+        }
+        updater_ = std::make_unique<Updater>(std::move(config));
+        updater_->start();
+    }
+    logf("host %s started on port %d", SIDEDROID_VERSION, opts_.port);
     return true;
 }
 
 void Host::stop() {
     if (!running_.exchange(false)) return;
+    if (updater_) updater_->stop();
     {
         std::lock_guard<std::mutex> lock(sessionMutex_);
         if (session_) session_->requestStop();
@@ -1021,8 +1075,13 @@ std::string Host::statusJson() {
       << ",\"usingVirtualDisplay\":" << (l.usingVirtualDisplay ? "true" : "false")
       << ",\"virtualDisplayInstalled\":" << (vddInstalled() ? "true" : "false")
       << ",\"adbFound\":" << (adb_.adbFound() ? "true" : "false")
-      << ",\"pairingCode\":\"" << code << "\",\"pairingSeconds\":" << codeSeconds
-      << ",\"settings\":{\"width\":" << settings.width << ",\"height\":" << settings.height << ",\"hz\":" << settings.hz
+      << ",\"pairingCode\":\"" << code << "\",\"pairingSeconds\":" << codeSeconds;
+    {
+        const UpdateStatus u = updateStatus();
+        o << ",\"update\":{\"state\":\"" << u.state << "\",\"version\":\"" << u.version << "\",\"notes\":\"" << jsonEscape(u.notes)
+          << "\",\"progress\":" << u.progress << "}";
+    }
+    o << ",\"settings\":{\"width\":" << settings.width << ",\"height\":" << settings.height << ",\"hz\":" << settings.hz
       << ",\"maxKbps\":" << settings.maxKbps << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false")
       << ",\"mirror\":" << (settings.mirror ? "true" : "false") << ",\"scale\":" << settings.scalePercent << "}"
       << ",\"options\":{";
@@ -1140,6 +1199,9 @@ std::string Host::handleCommand(const std::string& json) {
     if (cmd == "disconnect") {
         disconnectPhone();
         return R"({"ok":true})";
+    }
+    if (cmd == "update_install") {
+        return std::string(R"({"ok":)") + (installUpdate() ? "true" : "false") + "}";
     }
     return R"({"ok":false,"error":"unknown command"})";
 }

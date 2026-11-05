@@ -1,6 +1,8 @@
 package com.sidedroid.console
 
 import com.sidedroid.design.DisplayOptionsUi
+import com.sidedroid.design.UpdateStage
+import com.sidedroid.design.UpdateUi
 import java.io.File
 import java.io.RandomAccessFile
 import kotlinx.serialization.json.Json
@@ -55,6 +57,7 @@ data class HostStatus(
     val usbCount: Int = 0,
     val paired: List<PairedDevice> = emptyList(),
     val options: DisplayOptionsUi = DisplayOptionsUi(),
+    val update: UpdateUi? = null,
 )
 
 /** Parses the host's status line. Unknown or missing fields keep their defaults. */
@@ -104,6 +107,16 @@ fun parseStatus(line: String): HostStatus {
         usbUnauthorized = usb.any { s("state", it) == "unauthorized" },
         usbCount = usb.count { s("state", it) == "device" },
         paired = o["pairedDevices"]?.jsonArray?.map { PairedDevice(s("id", it.jsonObject), s("name", it.jsonObject)) } ?: emptyList(),
+        update = o["update"]?.jsonObject?.let { u ->
+            val stage = when (s("state", u)) {
+                "available" -> UpdateStage.Available
+                "downloading" -> UpdateStage.Downloading
+                "installing" -> UpdateStage.Installing
+                "failed" -> UpdateStage.Failed
+                else -> null
+            }
+            stage?.let { UpdateUi(s("version", u), s("notes", u), it, i("progress", u)) }
+        },
     )
 }
 
@@ -193,6 +206,7 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""", pr
     fun cancelPairing() { exchange("""{"cmd":"pair_cancel"}""") }
     fun disconnect() { exchange("""{"cmd":"disconnect"}""") }
     fun installDriver() { exchange("""{"cmd":"install_driver"}""") }
+    fun installUpdate() { exchange("""{"cmd":"update_install"}""") }
     fun unpair(id: String) {
         exchange(buildJsonObject { put("cmd", "unpair"); put("id", id) }.toString())
     }

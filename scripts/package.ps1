@@ -2,14 +2,28 @@
 #   SideDroid-<version>-x64.msi       full Windows package
 #   SideDroid-<version>-android-*.apk one per CPU type, and a universal one
 #   SHA256SUMS.txt
+#   update.json                       goes in the repository once the release is public
 # Windows parts build here; the APKs build inside WSL, where the Android SDK lives.
 param(
-    [string]$Version = '0.0.1',
+    [string]$Version = '0.0.2',
+    # What the update prompt says. Separate lines with `n.
+    [string]$Notes = '',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
     [switch]$SkipApk
 )
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path "$PSScriptRoot\.."
+
+# The version lives in several build files, and the updater compares against them.
+foreach ($check in @(
+    @('CMakeLists.txt', "project\(SideDroid VERSION $([regex]::Escape($Version)) "),
+    @('android\app\build.gradle.kts', "versionName = `"$([regex]::Escape($Version))`""),
+    @('ui\console\build.gradle.kts', "packageVersion = `"$([regex]::Escape($Version))`""),
+    @('ui\design\src\com\sidedroid\design\About.kt', "VERSION = `"$([regex]::Escape($Version))`"")
+)) {
+    if (-not (Select-String -Path (Join-Path $root $check[0]) -Pattern $check[1] -Quiet)) { throw "$($check[0]) does not say version $Version" }
+}
+
 $out = Join-Path $root 'out'
 $dist = Join-Path $out 'dist'
 $tools = Join-Path $out 'tools'
@@ -18,7 +32,7 @@ New-Item -ItemType Directory -Force $dist, $tools | Out-Null
 
 # Files of an earlier build must not end up in this release's checksums.
 Get-ChildItem "$out\SideDroid-*" -File | Where-Object { -not ($SkipApk -and $_.Extension -eq '.apk') } | Remove-Item
-Remove-Item "$out\SHA256SUMS.txt" -ErrorAction SilentlyContinue
+Remove-Item "$out\SHA256SUMS.txt", "$out\update.json" -ErrorAction SilentlyContinue
 
 function Require-Success($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
 
@@ -99,5 +113,22 @@ $files = Get-ChildItem $out -File | Where-Object { $_.Name -like 'SideDroid-*' }
 $lines = $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
 # Plain LF and no BOM, so that sha256sum -c accepts the file.
 [IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), (($lines -join "`n") + "`n"))
+
+Write-Host '== update.json'
+if (-not $SkipApk) {
+    function Sha-Of($name) { (Get-FileHash (Join-Path $out $name) -Algorithm SHA256).Hash.ToLower() }
+    $escapedNotes = $Notes.Replace('\', '\\').Replace('"', '\"').Replace("`r", '').Replace("`n", '\n')
+    $manifest = @"
+{
+  "version": "$Version",
+  "notes": "$escapedNotes",
+  "msi": "$(Sha-Of "SideDroid-$Version-x64.msi")",
+  "arm64-v8a": "$(Sha-Of "SideDroid-$Version-android-arm64-v8a.apk")",
+  "armeabi-v7a": "$(Sha-Of "SideDroid-$Version-android-armeabi-v7a.apk")",
+  "x86_64": "$(Sha-Of "SideDroid-$Version-android-x86_64.apk")"
+}
+"@
+    [IO.File]::WriteAllText((Join-Path $out 'update.json'), ($manifest.Replace("`r", '') + "`n"))
+}
 
 Get-ChildItem $out -File | Select-Object Name, Length | Format-Table -AutoSize

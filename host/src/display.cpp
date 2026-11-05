@@ -85,35 +85,98 @@ bool outputHasMode(const std::wstring& deviceName, const DisplayMode& m) {
     return std::find(modes.begin(), modes.end(), m) != modes.end();
 }
 
-bool attachOutput(const std::wstring& deviceName, const DisplayMode& m) {
-    if (auto o = findOutputByName(deviceName); o && !o->isVdd) {
-        logf("refusing to change the mode of %s: it is not only the virtual display", narrow(deviceName).c_str());
-        return false;
-    }
-    // A pipeline rebuild for bitrate reasons asks for the mode it already has.
-    // Setting it again would make the whole desktop flicker.
-    if (auto o = findOutputByName(deviceName); o && o->attached) {
-        DEVMODEW cur{};
-        cur.dmSize = sizeof(cur);
-        if (EnumDisplaySettingsExW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &cur, 0) && cur.dmPelsWidth == m.width &&
-            cur.dmPelsHeight == m.height && cur.dmDisplayFrequency == m.hz) {
-            return true;
+bool outputRect(const std::wstring& deviceName, RECT* out) {
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsExW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &dm, 0)) return false;
+    out->left = dm.dmPosition.x;
+    out->top = dm.dmPosition.y;
+    out->right = dm.dmPosition.x + static_cast<LONG>(dm.dmPelsWidth);
+    out->bottom = dm.dmPosition.y + static_cast<LONG>(dm.dmPelsHeight);
+    return true;
+}
+
+POINT placeDisplay(const RECT* previous, LONG width, LONG height, const std::vector<RECT>& others) {
+    const auto spanOverlap = [](LONG a1, LONG a2, LONG b1, LONG b2) { return a1 < b2 && b1 < a2; };
+    const auto at = [&](LONG x, LONG y) { return RECT{x, y, x + width, y + height}; };
+    // Windows only accepts a desktop with no overlaps and nothing left floating.
+    const auto fits = [&](const RECT& r) {
+        if (others.empty()) return true;
+        bool touching = false;
+        for (const auto& o : others) {
+            const bool overX = spanOverlap(r.left, r.right, o.left, o.right);
+            const bool overY = spanOverlap(r.top, r.bottom, o.top, o.bottom);
+            if (overX && overY) return false;
+            if ((overY && (r.right == o.left || r.left == o.right)) || (overX && (r.bottom == o.top || r.top == o.bottom)))
+                touching = true;
         }
+        return touching;
+    };
+
+    if (previous) {
+        const RECT& p = *previous;
+        LONG x = p.left, y = p.top;
+        const RECT* beside = nullptr;  // a display it touches on its left or right
+        const RECT* stacked = nullptr;  // a display it touches above or below
+        for (const auto& o : others) {
+            const bool overX = spanOverlap(p.left, p.right, o.left, o.right);
+            const bool overY = spanOverlap(p.top, p.bottom, o.top, o.bottom);
+            if (overY && p.right == o.left) x = o.left - width;
+            if (overX && p.bottom == o.top) y = o.top - height;
+            if (overY && (p.right == o.left || p.left == o.right)) beside = &o;
+            if (overX && (p.bottom == o.top || p.top == o.bottom)) stacked = &o;
+        }
+        if (fits(at(x, y))) return {x, y};
+        // Turning the phone can slide it past the end of the display it was next to.
+        if (beside && fits(at(x, beside->top))) return {x, beside->top};
+        if (stacked && fits(at(stacked->left, y))) return {stacked->left, y};
     }
 
     // Right of everything else, top aligned.
     LONG x = 0;
+    for (const auto& o : others) x = std::max(x, o.right);
+    return {x, 0};
+}
+
+bool attachOutput(const std::wstring& deviceName, const DisplayMode& m, const RECT* previous) {
+    auto self = findOutputByName(deviceName);
+    if (self && !self->isVdd) {
+        logf("refusing to change the mode of %s: it is not only the virtual display", narrow(deviceName).c_str());
+        return false;
+    }
+    const bool attached = self && self->attached;
+
+    std::vector<RECT> others;
     for (const auto& o : listOutputs())
-        if (o.attached && o.deviceName != deviceName) x = std::max(x, o.rect.right);
+        if (o.attached && o.deviceName != deviceName) others.push_back(o.rect);
+    const RECT* from = previous ? previous : attached ? &self->rect : nullptr;
+    const POINT pos = placeDisplay(from, m.width, m.height, others);
+    // The main display defines the origin of the desktop, so it never moves.
+    const bool keepPosition = attached && self->primary;
+
+    // A pipeline rebuild for bitrate reasons asks for what it already has.
+    // Setting it again would make the whole desktop flicker.
+    if (attached) {
+        DEVMODEW cur{};
+        cur.dmSize = sizeof(cur);
+        if (EnumDisplaySettingsExW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &cur, 0) && cur.dmPelsWidth == m.width &&
+            cur.dmPelsHeight == m.height && cur.dmDisplayFrequency == m.hz &&
+            (keepPosition || (cur.dmPosition.x == pos.x && cur.dmPosition.y == pos.y))) {
+            return true;
+        }
+    }
 
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
-    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION | DM_DISPLAYFREQUENCY;
+    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
     dm.dmPelsWidth = m.width;
     dm.dmPelsHeight = m.height;
     dm.dmDisplayFrequency = m.hz;
-    dm.dmPosition.x = x;
-    dm.dmPosition.y = 0;
+    if (!keepPosition) {
+        dm.dmFields |= DM_POSITION;
+        dm.dmPosition.x = pos.x;
+        dm.dmPosition.y = pos.y;
+    }
     LONG r = ChangeDisplaySettingsExW(deviceName.c_str(), &dm, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
     if (r == DISP_CHANGE_SUCCESSFUL) r = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
     if (r != DISP_CHANGE_SUCCESSFUL) {

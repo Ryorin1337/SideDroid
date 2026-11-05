@@ -22,6 +22,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,6 +38,7 @@ import com.sidedroid.design.PairingCodeText
 import com.sidedroid.design.SdIcons
 import com.sidedroid.design.SectionCard
 import com.sidedroid.design.StatusHero
+import com.sidedroid.design.UpdateCard
 
 data class ConsoleActions(
     val onSetDisplay: (HostSettings) -> Unit = {},
@@ -43,6 +48,7 @@ data class ConsoleActions(
     val onCancelPairing: () -> Unit = {},
     val onUnpair: (String) -> Unit = {},
     val onStartService: () -> Unit = {},
+    val onInstallUpdate: () -> Unit = {},
 )
 
 
@@ -70,6 +76,7 @@ fun ConsoleScreen(
     serviceStopped: Boolean = false,
     startupFailed: Boolean = false,
 ) {
+    var hiddenUpdate by remember { mutableStateOf<String?>(null) }
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -120,6 +127,10 @@ fun ConsoleScreen(
                     color = MaterialTheme.colorScheme.tertiary,
                 )
             }
+        }
+
+        status.update?.takeUnless { it.version == hiddenUpdate }?.let { update ->
+            UpdateCard(update, actions.onInstallUpdate, { hiddenUpdate = update.version })
         }
 
         val set = status.settings

@@ -24,7 +24,12 @@ TouchInjector::~TouchInjector() {
     if (device_) DestroySyntheticPointerDevice(device_);
 }
 
-void TouchInjector::setDisplayRect(const RECT& r) { rect_ = r; }
+void TouchInjector::setDisplayRect(const RECT& r) {
+    if (EqualRect(&r, &rect_)) return;
+    // A finger held across the move would jump from one place to the other.
+    releaseAll();
+    rect_ = r;
+}
 
 static POINTER_TYPE_INFO makeInfo(uint32_t pointerId, POINT pos, uint32_t pressure, POINTER_FLAGS flags) {
     POINTER_TYPE_INFO info{};
@@ -48,10 +53,17 @@ void TouchInjector::inject(const std::vector<TouchPoint>& points) {
     const POINTER_FLAGS downFlags = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
     const POINTER_FLAGS moveFlags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
 
+    // Injection counts from the corner of the virtual screen, not from the main display.
+    // The two only differ once some display is left of or above the main one, where a
+    // desktop coordinate would be negative and Windows would clamp it to the main display.
+    const POINT origin{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN)};
+
     std::map<uint8_t, POINTER_TYPE_INFO> frame;
     std::vector<uint8_t> finished;
     for (const auto& p : points) {
         POINT pos = mapTouchToDesktop(p.x, p.y, rect_);
+        pos.x -= origin.x;
+        pos.y -= origin.y;
         auto it = active_.find(p.id);
         switch (p.action) {
         case TouchAction::Down:

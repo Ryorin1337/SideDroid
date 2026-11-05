@@ -50,6 +50,7 @@ data class PhoneHomeState(
     val hosts: List<DiscoveredHost> = emptyList(),
     val connecting: Boolean = false,
     val error: String? = null,
+    val update: UpdateUi? = null,
 )
 
 private enum class HomeLayout { Single, TwoPanes }
@@ -138,9 +139,14 @@ fun PhoneHomeScreen(
     onHost: (DiscoveredHost) -> Unit,
     onManual: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onInstallUpdate: () -> Unit = {},
 ) {
     var manualOpen by remember { mutableStateOf(false) }
     var aboutOpen by remember { mutableStateOf(false) }
+    var updateHidden by remember { mutableStateOf(false) }
+    val updateCard: @Composable () -> Unit = {
+        state.update?.takeUnless { updateHidden }?.let { UpdateCard(it, onInstallUpdate, { updateHidden = true }) }
+    }
 
     BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         val compactHeight = maxHeight < 480.dp
@@ -150,6 +156,7 @@ fun PhoneHomeScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 ConnectPane(state, onUsb, { aboutOpen = true }, compactHeight)
+                updateCard()
                 WirelessPane(state, onHost) { manualOpen = true }
             }
             // On a large tablet the two panes stay readable rather than spreading out.
@@ -158,7 +165,10 @@ fun PhoneHomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
             ) {
                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) { ConnectPane(state, onUsb, { aboutOpen = true }, compactHeight) }
-                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) { WirelessPane(state, onHost) { manualOpen = true } }
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    updateCard()
+                    WirelessPane(state, onHost) { manualOpen = true }
+                }
             }
         }
     }

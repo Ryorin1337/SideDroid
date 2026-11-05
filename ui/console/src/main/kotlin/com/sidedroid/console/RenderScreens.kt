@@ -27,6 +27,8 @@ import com.sidedroid.design.PhoneHomeState
 import com.sidedroid.design.SideDroidTheme
 import com.sidedroid.design.StreamInfo
 import com.sidedroid.design.StreamOverlay
+import com.sidedroid.design.UpdateStage
+import com.sidedroid.design.UpdateUi
 import java.io.File
 import org.jetbrains.skia.EncodedImageFormat
 
@@ -125,6 +127,17 @@ fun main(args: Array<String>) {
             }
         }
         render(out, "console-port-busy", 460, 860, dark) { Console(HostStatus(reachable = true, error = "port_in_use")) }
+        val sampleUpdate = UpdateUi("0.0.2", "修复拖动副屏后触摸失效\n修复修改分辨率后副屏跳回原位")
+        render(out, "console-update", 460, 860, dark) { Console(connected.copy(update = sampleUpdate)) }
+        render(out, "console-update-downloading", 460, 860, dark) { Console(connected.copy(update = sampleUpdate.copy(stage = UpdateStage.Downloading, progress = 42))) }
+        render(out, "console-update-failed", 460, 860, dark) { Console(connected.copy(update = sampleUpdate.copy(stage = UpdateStage.Failed))) }
+        for ((name, size) in listOf("phone" to (400 to 860), "tablet-land" to (1280 to 800))) {
+            render(out, "home-update-$name", size.first, size.second, dark) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                    PhoneHomeScreen(PhoneHomeState(hosts = hosts, update = sampleUpdate), {}, {}, {})
+                }
+            }
+        }
         render(out, "console-about", 460, 860, dark) {
             Console(connected)
             AboutDialog(onDismiss = {})
