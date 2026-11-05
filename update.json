@@ -1,0 +1,8 @@
+{
+  "version": "0.0.2",
+  "notes": "修复副屏拖到主屏左边或上方后触摸失效\n修复修改分辨率或刷新率后副屏跳回原来的位置\n新增自动检查更新",
+  "msi": "1ca834e5218fe2daca58ca36da26c9186c25fd45b8711f7931533aae15cada8f",
+  "arm64-v8a": "ca0cdf5903ccce71c6b2b6ae5105203ba6589892ad447ed14773e275130c051d",
+  "armeabi-v7a": "a712824ea05a30243a4eafe84dbebe47194c37aca856af699282da87595f396f",
+  "x86_64": "78b741bb81a7d4e502a704313df2c2d974f11457fa73630a05ab7733a804f6a1"
+}
