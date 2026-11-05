@@ -1,8 +1,8 @@
 {
-  "version": "0.0.2",
-  "notes": "修复副屏拖到主屏左边或上方后触摸失效\n修复修改分辨率或刷新率后副屏跳回原来的位置\n新增自动检查更新",
-  "msi": "1ca834e5218fe2daca58ca36da26c9186c25fd45b8711f7931533aae15cada8f",
-  "arm64-v8a": "ca0cdf5903ccce71c6b2b6ae5105203ba6589892ad447ed14773e275130c051d",
-  "armeabi-v7a": "a712824ea05a30243a4eafe84dbebe47194c37aca856af699282da87595f396f",
-  "x86_64": "78b741bb81a7d4e502a704313df2c2d974f11457fa73630a05ab7733a804f6a1"
+  "version": "0.1.0",
+  "notes": "这是一个大版本更新\n最多同时连接 4 台设备，每台各有一块屏，设置分开保存\n虚拟屏只在连接时存在，断开后消失\n新增 AMD AMF、Intel Quick Sync 和 CPU 软件编码，可以选择显卡和编码器\n新增画面适配：适应、填充、拉伸和平铺\n串流时的工具条换成吸附在屏幕两侧的把手",
+  "msi": "2befa4e877e18c23d5e9342112bf39789c6c6ebafc6d6fc92ea1762e447e3505",
+  "arm64-v8a": "7776ea04844ffcdc7c78cd7d8967aa6519cf6e130fc34a91645805e1303a3d7a",
+  "armeabi-v7a": "57a637521d7abd74668b179be46bbb615169859906e2120fcbf8292afa6176f1",
+  "x86_64": "f6bddbec92d7849d3301027f580e23e7d548cb336682901b9bd27a676c269246"
 }
