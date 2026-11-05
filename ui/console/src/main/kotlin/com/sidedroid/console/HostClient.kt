@@ -24,30 +24,40 @@ data class HostSettings(
     val allowWireless: Boolean = true,
     val mirror: Boolean = false,
     val scale: Int = 0,
+    val encoder: String = "",
+    val fill: Int = 0,
 )
+
+data class EncoderOption(val id: String, val label: String)
 
 data class PairedDevice(val id: String, val name: String)
 
-data class HostStatus(
-    val reachable: Boolean = false,
-    val connected: Boolean = false,
-    val device: String = "",
+/** One connected device, with its own stream and its own display settings. */
+data class ConnectedDevice(
+    val id: String = "",
+    val name: String = "",
     val transport: String = "",
     val error: String = "",
     val encoder: String = "",
     val codec: String = "",
     val displayW: Int = 0,
     val displayH: Int = 0,
-    val hz: Int = 0,
     val encodeW: Int = 0,
     val encodeH: Int = 0,
-    val fps: Int = 0,
     val kbps: Int = 0,
     val rttMs: Int = 0,
-    val decodeMs: Int = 0,
-    val encodeMs: Double = 0.0,
     val measuredFps: Double = 0.0,
-    val lossPercent: Double = 0.0,
+    val crossAdapter: Boolean = false,
+    val encoderFallback: Boolean = false,
+    val settings: HostSettings = HostSettings(),
+    val options: DisplayOptionsUi = DisplayOptionsUi(),
+)
+
+data class HostStatus(
+    val reachable: Boolean = false,
+    val devices: List<ConnectedDevice> = emptyList(),
+    val maxDevices: Int = 4,
+    val error: String = "",
     val virtualDisplayInstalled: Boolean = true,
     val adbFound: Boolean = true,
     val pairingCode: String = "",
@@ -58,6 +68,13 @@ data class HostStatus(
     val paired: List<PairedDevice> = emptyList(),
     val options: DisplayOptionsUi = DisplayOptionsUi(),
     val update: UpdateUi? = null,
+    val gpus: List<String> = emptyList(),
+    val vddGpu: String = "",
+    val vddGpuEditable: Boolean = true,
+    val encoders: List<EncoderOption> = emptyList(),
+    val consoleAutostart: Boolean = false,
+    // True unless the host says otherwise, so that nothing asks before the status is known.
+    val consoleAutostartAsked: Boolean = true,
 )
 
 /** Parses the host's status line. Unknown or missing fields keep their defaults. */
@@ -65,45 +82,62 @@ fun parseStatus(line: String): HostStatus {
     val o = Json.parseToJsonElement(line).jsonObject
     fun s(k: String, src: JsonObject = o) = src[k]?.jsonPrimitive?.content ?: ""
     fun i(k: String, src: JsonObject = o) = src[k]?.jsonPrimitive?.intOrNull ?: 0
-    fun d(k: String) = o[k]?.jsonPrimitive?.doubleOrNull ?: 0.0
+    fun d(k: String, src: JsonObject = o) = src[k]?.jsonPrimitive?.doubleOrNull ?: 0.0
     fun b(k: String, def: Boolean = false, src: JsonObject = o) = src[k]?.jsonPrimitive?.booleanOrNull ?: def
-    val set = o["settings"]?.jsonObject ?: JsonObject(emptyMap())
+    fun settings(src: JsonObject?, allowWireless: Boolean = true): HostSettings {
+        val set = src ?: JsonObject(emptyMap())
+        return HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", allowWireless, set), b("mirror", false, set), i("scale", set), s("encoder", set), i("fill", set))
+    }
+    fun options(src: JsonObject?): DisplayOptionsUi {
+        val opt = src ?: JsonObject(emptyMap())
+        return DisplayOptionsUi(
+            phone = i("phoneW", opt) to i("phoneH", opt),
+            pc = i("pcW", opt) to i("pcH", opt),
+            resolutions = opt["resolutions"]?.jsonArray?.map { i("w", it.jsonObject) to i("h", it.jsonObject) } ?: emptyList(),
+            rates = opt["rates"]?.jsonArray?.mapNotNull { it.jsonPrimitive.intOrNull }?.ifEmpty { null } ?: listOf(60, 90, 120),
+            recommendedScale = i("recommendedScale", opt),
+            currentScale = i("currentScale", opt),
+        )
+    }
+    val defaults = settings(o["settings"]?.jsonObject)
     val usb = o["usbDevices"]?.jsonArray?.map { it.jsonObject } ?: emptyList()
     return HostStatus(
         reachable = true,
-        connected = b("connected"),
-        device = s("device"),
-        transport = s("transport"),
+        devices = o["devices"]?.jsonArray?.map { it.jsonObject }?.map { e ->
+            ConnectedDevice(
+                id = s("id", e),
+                name = s("name", e),
+                transport = s("transport", e),
+                error = s("error", e),
+                encoder = s("encoder", e),
+                codec = s("codec", e),
+                displayW = i("displayW", e),
+                displayH = i("displayH", e),
+                encodeW = i("encodeW", e),
+                encodeH = i("encodeH", e),
+                kbps = i("kbps", e),
+                rttMs = i("rttMs", e),
+                measuredFps = d("measuredFps", e),
+                crossAdapter = b("crossAdapter", false, e),
+                encoderFallback = b("encoderFallback", false, e),
+                settings = settings(e["settings"]?.jsonObject, defaults.allowWireless),
+                options = options(e["options"]?.jsonObject),
+            )
+        } ?: emptyList(),
+        maxDevices = o["maxDevices"]?.jsonPrimitive?.intOrNull ?: 4,
+        gpus = o["gpus"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+        vddGpu = s("vddGpu"),
+        vddGpuEditable = b("vddGpuEditable", true),
+        encoders = o["encoders"]?.jsonArray?.map { EncoderOption(s("id", it.jsonObject), s("label", it.jsonObject)) } ?: emptyList(),
+        consoleAutostart = b("consoleAutostart"),
+        consoleAutostartAsked = b("consoleAutostartAsked", true),
         error = s("error"),
-        encoder = s("encoder"),
-        codec = s("codec"),
-        displayW = i("displayW"),
-        displayH = i("displayH"),
-        hz = i("hz"),
-        encodeW = i("encodeW"),
-        encodeH = i("encodeH"),
-        fps = i("fps"),
-        kbps = i("kbps"),
-        rttMs = i("rttMs"),
-        decodeMs = i("decodeMs"),
-        encodeMs = d("encodeMs"),
-        measuredFps = d("measuredFps"),
-        lossPercent = d("lossPercent"),
         virtualDisplayInstalled = b("virtualDisplayInstalled", true),
         adbFound = b("adbFound", true),
         pairingCode = s("pairingCode"),
         pairingSeconds = i("pairingSeconds"),
-        settings = HostSettings(i("width", set), i("height", set), i("hz", set), i("maxKbps", set), b("allowWireless", true, set), b("mirror", false, set), i("scale", set)),
-        options = (o["options"]?.jsonObject ?: JsonObject(emptyMap())).let { opt ->
-            DisplayOptionsUi(
-                phone = i("phoneW", opt) to i("phoneH", opt),
-                pc = i("pcW", opt) to i("pcH", opt),
-                resolutions = opt["resolutions"]?.jsonArray?.map { i("w", it.jsonObject) to i("h", it.jsonObject) } ?: emptyList(),
-                rates = opt["rates"]?.jsonArray?.mapNotNull { it.jsonPrimitive.intOrNull }?.ifEmpty { null } ?: listOf(60, 90, 120),
-                recommendedScale = i("recommendedScale", opt),
-                currentScale = i("currentScale", opt),
-            )
-        },
+        settings = defaults,
+        options = options(o["options"]?.jsonObject),
         usbUnauthorized = usb.any { s("state", it) == "unauthorized" },
         usbCount = usb.count { s("state", it) == "device" },
         paired = o["pairedDevices"]?.jsonArray?.map { PairedDevice(s("id", it.jsonObject), s("name", it.jsonObject)) } ?: emptyList(),
@@ -188,9 +222,11 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""", pr
 
     fun status(): HostStatus = exchange("""{"cmd":"status"}""")?.let { runCatching { parseStatus(it) }.getOrNull() } ?: HostStatus()
 
-    fun setDisplay(width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean, mirror: Boolean, scale: Int) {
+    /** With a device id, for that device. Without, new defaults for every device. */
+    fun setDisplay(deviceId: String?, width: Int, height: Int, hz: Int, maxKbps: Int, allowWireless: Boolean, mirror: Boolean, scale: Int, encoder: String, fill: Int) {
         val body = buildJsonObject {
             put("cmd", "set")
+            if (deviceId != null) put("id", deviceId)
             put("width", width)
             put("height", height)
             put("hz", hz)
@@ -198,13 +234,25 @@ class HostClient(private val pipePath: String = """\\.\pipe\SideDroidHost""", pr
             put("allowWireless", allowWireless)
             put("mirror", mirror)
             put("scale", scale)
+            put("encoder", encoder)
+            put("fill", fill)
         }
         exchange(body.toString())
     }
 
+    fun setVddGpu(gpu: String) {
+        exchange(buildJsonObject { put("cmd", "set_gpu"); put("gpu", gpu) }.toString())
+    }
+
+    fun setConsoleAutostart(enabled: Boolean) {
+        exchange(buildJsonObject { put("cmd", "console_autostart"); put("enabled", enabled) }.toString())
+    }
+
     fun startPairing() { exchange("""{"cmd":"pair_start"}""") }
     fun cancelPairing() { exchange("""{"cmd":"pair_cancel"}""") }
-    fun disconnect() { exchange("""{"cmd":"disconnect"}""") }
+    fun disconnect(deviceId: String) {
+        exchange(buildJsonObject { put("cmd", "disconnect"); put("id", deviceId) }.toString())
+    }
     fun installDriver() { exchange("""{"cmd":"install_driver"}""") }
     fun installUpdate() { exchange("""{"cmd":"update_install"}""") }
     fun unpair(id: String) {

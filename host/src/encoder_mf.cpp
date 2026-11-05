@@ -26,20 +26,6 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-void ensureMfStarted() {
-    static std::once_flag once;
-    std::call_once(once, [] { MFStartup(MF_VERSION, MFSTARTUP_LITE); });
-}
-
-UINT vendorOf(ID3D11Device* dev) {
-    ComPtr<IDXGIDevice> dxgi;
-    ComPtr<IDXGIAdapter> adapter;
-    DXGI_ADAPTER_DESC d{};
-    if (SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)))
-        adapter->GetDesc(&d);
-    return d.VendorId;
-}
-
 class MfEncoder final : public Encoder {
 public:
     ~MfEncoder() override {
@@ -50,7 +36,7 @@ public:
     }
 
     bool init(const EncoderConfig& cfg) {
-        ensureMfStarted();
+        ensureMediaFoundationStarted();
         cfg_ = cfg;
         const GUID subtype = cfg.codec == kCodecHevc ? MFVideoFormat_HEVC : MFVideoFormat_H264;
         MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, subtype};
@@ -63,7 +49,7 @@ public:
         }
 
         // Each GPU registers its own MFT, and only the matching one accepts our device.
-        const UINT vendor = vendorOf(cfg.device);
+        const UINT vendor = adapterVendor(cfg.device);
         bool ok = false;
         for (UINT i = 0; i < count && !ok; ++i) {
             UINT32 mftVendor = 0;
@@ -142,6 +128,7 @@ public:
     }
 
     const char* name() const override { return "Media Foundation"; }
+    const char* kind() const override { return "mf"; }
 
 private:
     bool tryActivate(IMFActivate* a) {
@@ -251,7 +238,7 @@ private:
             if (SUCCEEDED(flat->Lock(&p, nullptr, &len))) {
                 UINT32 clean = 0;
                 sample->GetUINT32(MFSampleExtension_CleanPoint, &clean);
-                if (clean && !sequenceHeader_.empty() && !hasParameterSets(p, len)) {
+                if (clean && !sequenceHeader_.empty() && !annexBHasParameterSets(p, len, cfg_.codec == kCodecHevc)) {
                     scratch_.assign(sequenceHeader_.begin(), sequenceHeader_.end());
                     scratch_.insert(scratch_.end(), p, p + len);
                     out(scratch_.data(), scratch_.size(), true);
@@ -265,16 +252,6 @@ private:
         return ok;
     }
 
-    bool hasParameterSets(const BYTE* p, DWORD len) const {
-        for (DWORD i = 0; i + 4 < len && i < 256; ++i) {
-            if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
-                int type = cfg_.codec == kCodecHevc ? (p[i + 3] >> 1) & 0x3F : p[i + 3] & 0x1F;
-                if (cfg_.codec == kCodecHevc ? (type == 32 || type == 33) : (type == 7)) return true;
-            }
-        }
-        return false;
-    }
-
     EncoderConfig cfg_{};
     ComPtr<IMFTransform> transform_;
     ComPtr<IMFMediaEventGenerator> events_;
@@ -286,6 +263,30 @@ private:
 };
 
 }  // namespace
+
+void ensureMediaFoundationStarted() {
+    static std::once_flag once;
+    std::call_once(once, [] { MFStartup(MF_VERSION, MFSTARTUP_LITE); });
+}
+
+UINT adapterVendor(ID3D11Device* dev) {
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC d{};
+    if (SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)))
+        adapter->GetDesc(&d);
+    return d.VendorId;
+}
+
+bool annexBHasParameterSets(const uint8_t* p, size_t len, bool hevc) {
+    for (size_t i = 0; i + 4 < len && i < 256; ++i) {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+            const int type = hevc ? (p[i + 3] >> 1) & 0x3F : p[i + 3] & 0x1F;
+            if (hevc ? (type == 32 || type == 33) : (type == 7)) return true;
+        }
+    }
+    return false;
+}
 
 std::unique_ptr<Encoder> createMfEncoder(const EncoderConfig& cfg) {
     auto e = std::make_unique<MfEncoder>();

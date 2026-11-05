@@ -64,14 +64,31 @@ Size primaryDisplaySize();
 
 // Edits only <resolutions>, <g_refresh_rate> entries; every other setting stays.
 // Pure, for testing. Returns the new document, or nullopt if nothing changed.
-std::optional<std::string> addModesToVddXml(const std::string& xml, const std::vector<DisplayMode>& modes);
+//
+// With too many modes the driver starts without any monitor at all. Measured with 4 monitors
+// and 6 refresh rates: 14 sizes work and 15 do not. Whether sizes or sizes times rates is what
+// counts was not settled, so both stay at what was seen to work. Past that, the oldest sizes
+// go, except those in `modes` and `keep`, the ones devices are using.
+std::optional<std::string> addModesToVddXml(const std::string& xml, const std::vector<DisplayMode>& modes,
+                                            const std::vector<DisplayMode>& keep = {});
+
+// Sets <monitors><count>. Pure, for testing. Returns the new document, or nullopt if nothing changed.
+std::optional<std::string> setVddMonitorCountInXml(const std::string& xml, int count);
+
+// Sets which GPU renders the virtual displays, "default" for Windows' choice. All of them
+// share it: the driver has one setting. Pure, for testing. nullopt if nothing changed.
+std::optional<std::string> setVddGpuInXml(const std::string& xml, const std::string& gpu);
 
 // Default config path, or the one set in the driver's registry key.
 std::wstring vddConfigPath();
-// Adds any missing modes to the XML. Returns false if the file cannot be written.
-bool ensureVddModes(const std::vector<DisplayMode>& modes, bool* changed);
-// Sends a command to \\.\pipe\MTTVirtualDisplayPipe. Returns false if the driver is not there.
-bool vddCommand(const std::wstring& command);
+// Adds any missing modes to the XML, sets the number of monitors unless it is 0, and the GPU
+// unless it is empty. Returns false if the file cannot be written.
+bool ensureVddConfig(const std::vector<DisplayMode>& modes, const std::vector<DisplayMode>& keep, int monitorCount, const std::string& gpu,
+                     bool* changed);
+// Asks the service to "enable", "disable" or "restart" the driver's device. Restarting is what
+// makes the driver read its configuration. Returns the error, or nullopt if it is done.
+// ERROR_FILE_NOT_FOUND means the service is not running.
+std::optional<DWORD> askDisplayService(const char* word);
 bool vddInstalled();
 
 }  // namespace sd

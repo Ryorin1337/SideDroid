@@ -88,6 +88,17 @@ void Store::load() {
             auto eq = line.find('=');
             if (eq == std::string::npos) continue;
             auto key = line.substr(0, eq);
+            if (key.rfind("device.", 0) == 0) {
+                DeviceSettings d;
+                if (parseDeviceSettings(line.substr(eq + 1), d)) devices_[key.substr(7)] = d;
+                continue;
+            }
+            if (key == "encoder" || key == "vddGpu") {
+                std::string value = line.substr(eq + 1);
+                if (!value.empty() && value.back() == '\r') value.pop_back();
+                (key == "encoder" ? settings_.encoder : settings_.vddGpu) = value;
+                continue;
+            }
             long v = atol(line.c_str() + eq + 1);
             if (key == "width") settings_.width = static_cast<uint16_t>(v);
             else if (key == "height") settings_.height = static_cast<uint16_t>(v);
@@ -96,6 +107,8 @@ void Store::load() {
             else if (key == "allowWireless") settings_.allowWireless = v != 0;
             else if (key == "mirror") settings_.mirror = v != 0;
             else if (key == "scale") settings_.scalePercent = static_cast<uint16_t>(v);
+            else if (key == "fill") settings_.fill = static_cast<uint8_t>(v >= 0 && v <= 3 ? v : 0);
+            else if (key == "consoleAutostartAsked") settings_.consoleAutostartAsked = v != 0;
             else if (key == "vddLeft") settings_.vddLeft = static_cast<int>(v);
             else if (key == "vddTop") settings_.vddTop = static_cast<int>(v);
             else if (key == "vddRight") settings_.vddRight = static_cast<int>(v);
@@ -126,8 +139,9 @@ void Store::saveSettings() {
     std::ostringstream ss;
     ss << "width=" << settings_.width << "\nheight=" << settings_.height << "\nhz=" << settings_.hz
        << "\nmaxKbps=" << settings_.maxKbps << "\nallowWireless=" << (settings_.allowWireless ? 1 : 0) << "\nmirror=" << (settings_.mirror ? 1 : 0)
-       << "\nscale=" << settings_.scalePercent << "\nvddLeft=" << settings_.vddLeft << "\nvddTop=" << settings_.vddTop
+       << "\nscale=" << settings_.scalePercent << "\nfill=" << static_cast<int>(settings_.fill) << "\nencoder=" << settings_.encoder << "\nvddGpu=" << settings_.vddGpu << "\nconsoleAutostartAsked=" << (settings_.consoleAutostartAsked ? 1 : 0) << "\nvddLeft=" << settings_.vddLeft << "\nvddTop=" << settings_.vddTop
        << "\nvddRight=" << settings_.vddRight << "\nvddBottom=" << settings_.vddBottom << "\n";
+    for (const auto& [id, d] : devices_) ss << "device." << id << '=' << serializeDeviceSettings(d) << '\n';
     auto s = ss.str();
     if (!writeFile(settingsPath(), s.data(), s.size())) logf("cannot save settings");
 }
@@ -158,6 +172,7 @@ bool Store::removePaired(const std::string& idHex) {
         if (toHex(it->id.data(), it->id.size()) == idHex) {
             paired_.erase(it);
             savePaired();
+            if (devices_.erase(idHex)) saveSettings();
             return true;
         }
     }
@@ -180,13 +195,78 @@ void Store::setSettings(const Settings& s) {
     saveSettings();
 }
 
-void Store::setVddRect(int left, int top, int right, int bottom) {
+void copyDisplayDefaults(const Settings& s, DeviceSettings& into) {
+    into.width = s.width;
+    into.height = s.height;
+    into.hz = s.hz;
+    into.maxKbps = s.maxKbps;
+    into.mirror = s.mirror;
+    into.scalePercent = s.scalePercent;
+    into.fill = s.fill;
+    into.encoder = s.encoder;
+}
+
+std::string serializeDeviceSettings(const DeviceSettings& d) {
+    std::ostringstream ss;
+    ss << d.width << ',' << d.height << ',' << d.hz << ',' << d.maxKbps << ',' << (d.mirror ? 1 : 0) << ',' << d.scalePercent << ','
+       << (d.custom ? 1 : 0) << ',' << d.left << ',' << d.top << ',' << d.right << ',' << d.bottom << ",fill=" << static_cast<int>(d.fill) << ',' << d.encoder;
+    return ss.str();
+}
+
+bool parseDeviceSettings(const std::string& text, DeviceSettings& out) {
+    unsigned w, h, hz, kbps, mirror, scale, custom;
+    int l, t, r, b, used = 0;
+    if (sscanf(text.c_str(), "%u,%u,%u,%u,%u,%u,%u,%d,%d,%d,%d%n", &w, &h, &hz, &kbps, &mirror, &scale, &custom, &l, &t, &r, &b, &used) != 11) return false;
+    // Last, because a GPU's name can hold anything. Earlier versions did not have it.
+    out.encoder = text.size() > static_cast<size_t>(used) + 1 ? text.substr(used + 1) : std::string{};
+    // Marked, because earlier versions have the encoder straight after the numbers.
+    out.fill = 0;
+    if (out.encoder.rfind("fill=", 0) == 0) {
+        const int fill = atoi(out.encoder.c_str() + 5);
+        out.fill = static_cast<uint8_t>(fill >= 0 && fill <= 3 ? fill : 0);
+        const auto comma = out.encoder.find(',');
+        out.encoder = comma == std::string::npos ? std::string{} : out.encoder.substr(comma + 1);
+    }
+    if (!out.encoder.empty() && out.encoder.back() == '\r') out.encoder.pop_back();
+    out.width = static_cast<uint16_t>(w);
+    out.height = static_cast<uint16_t>(h);
+    out.hz = static_cast<uint16_t>(hz);
+    out.maxKbps = kbps;
+    out.mirror = mirror != 0;
+    out.scalePercent = static_cast<uint16_t>(scale);
+    out.custom = custom != 0;
+    out.left = l;
+    out.top = t;
+    out.right = r;
+    out.bottom = b;
+    return true;
+}
+
+DeviceSettings Store::deviceSettings(const ClientId& id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (settings_.vddLeft == left && settings_.vddTop == top && settings_.vddRight == right && settings_.vddBottom == bottom) return;
-    settings_.vddLeft = left;
-    settings_.vddTop = top;
-    settings_.vddRight = right;
-    settings_.vddBottom = bottom;
+    DeviceSettings d;
+    const auto it = devices_.find(toHex(id.data(), id.size()));
+    if (it != devices_.end()) {
+        d = it->second;
+    } else {
+        d.left = settings_.vddLeft;
+        d.top = settings_.vddTop;
+        d.right = settings_.vddRight;
+        d.bottom = settings_.vddBottom;
+    }
+    if (!d.custom) copyDisplayDefaults(settings_, d);
+    return d;
+}
+
+void Store::setDeviceSettings(const ClientId& id, const DeviceSettings& d) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    devices_[toHex(id.data(), id.size())] = d;
+    saveSettings();
+}
+
+void Store::clearCustomDeviceSettings() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, d] : devices_) d.custom = false;
     saveSettings();
 }
 

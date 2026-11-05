@@ -30,6 +30,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sidedroid.design.Choice
+import com.sidedroid.design.ChoiceRow
 import com.sidedroid.design.DisplaySettings
 import com.sidedroid.design.DisplayValue
 import com.sidedroid.design.ConnectionVisual
@@ -37,18 +39,21 @@ import com.sidedroid.design.MetricTile
 import com.sidedroid.design.PairingCodeText
 import com.sidedroid.design.SdIcons
 import com.sidedroid.design.SectionCard
+import com.sidedroid.design.SettingDropdownRow
 import com.sidedroid.design.StatusHero
 import com.sidedroid.design.UpdateCard
 
 data class ConsoleActions(
-    val onSetDisplay: (HostSettings) -> Unit = {},
-    val onDisconnect: () -> Unit = {},
+    val onSetDisplay: (deviceId: String?, HostSettings) -> Unit = { _, _ -> },
+    val onDisconnect: (deviceId: String) -> Unit = {},
     val onInstallDriver: () -> Unit = {},
     val onStartPairing: () -> Unit = {},
     val onCancelPairing: () -> Unit = {},
     val onUnpair: (String) -> Unit = {},
     val onStartService: () -> Unit = {},
     val onInstallUpdate: () -> Unit = {},
+    val onSetConsoleAutostart: (Boolean) -> Unit = {},
+    val onSetVddGpu: (String) -> Unit = {},
 )
 
 
@@ -56,6 +61,9 @@ private fun errorText(code: String) = when (code) {
     "virtual_display_missing" -> "未找到虚拟显示驱动"
     "virtual_display_config_denied" -> "无法写入虚拟显示配置，已使用最接近的分辨率"
     "virtual_display_layout" -> "无法把虚拟屏设为独立显示器"
+    "virtual_display_count" -> "无法再增加虚拟显示器"
+    "virtual_display_busy" -> "虚拟屏正被其他程序占用，无法增加显示器"
+    "display_service_failed" -> "显示服务出错，请重新安装 SideDroid"
     "port_in_use" -> "端口 27183 被其他程序占用，正在重试"
     "no_encoder" -> "没有找到可用的硬件编码器"
     else -> code
@@ -77,11 +85,23 @@ fun ConsoleScreen(
     startupFailed: Boolean = false,
 ) {
     var hiddenUpdate by remember { mutableStateOf<String?>(null) }
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    // Whoever was selected may have left. The oldest device takes over.
+    val selected = status.devices.firstOrNull { it.id == selectedId } ?: status.devices.firstOrNull()
+    val error = selected?.error?.ifEmpty { null } ?: status.error
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        val problem = !status.reachable || !status.virtualDisplayInstalled || status.error.isNotEmpty()
+        val problem = !status.reachable || !status.virtualDisplayInstalled || error.isNotEmpty()
+        if (status.devices.size > 1 && selected != null) {
+            ChoiceRow(
+                "已连接 ${status.devices.size} 台设备（最多 ${status.maxDevices} 台）",
+                status.devices.map { Choice(it.name.ifEmpty { "Android" }, it.id) },
+                selected.id,
+                { selectedId = it },
+            )
+        }
         when {
             !status.reachable && serviceStopped -> StatusHero(
                 ConnectionVisual.Idle,
@@ -102,27 +122,27 @@ fun ConsoleScreen(
                 "需要安装虚拟显示驱动，Windows 会请你确认。",
                 actions = { Button(onClick = actions.onInstallDriver) { Text("安装驱动") } },
             )
-            status.connected -> StatusHero(
-                if (status.error.isNotEmpty()) ConnectionVisual.Problem else ConnectionVisual.Connected,
-                status.device.ifEmpty { "Android" },
-                if (status.error.isNotEmpty()) errorText(status.error)
-                else "${if (status.transport == "wifi") "Wi-Fi" else "USB"} · ${status.encoder} ${status.codec}",
-                icon = if (status.transport == "wifi") SdIcons.Wifi else SdIcons.Usb,
-                actions = { Button(onClick = actions.onDisconnect) { Text("断开连接") } },
+            selected != null -> StatusHero(
+                if (error.isNotEmpty()) ConnectionVisual.Problem else ConnectionVisual.Connected,
+                selected.name.ifEmpty { "Android" },
+                if (error.isNotEmpty()) errorText(error)
+                else "${if (selected.transport == "wifi") "Wi-Fi" else "USB"} · ${selected.encoder} ${selected.codec}",
+                icon = if (selected.transport == "wifi") SdIcons.Wifi else SdIcons.Usb,
+                actions = { Button(onClick = { actions.onDisconnect(selected.id) }) { Text("断开连接") } },
             )
-            status.error.isNotEmpty() -> StatusHero(ConnectionVisual.Problem, "暂时无法连接", errorText(status.error))
+            error.isNotEmpty() -> StatusHero(ConnectionVisual.Problem, "暂时无法连接", errorText(error))
             else -> StatusHero(ConnectionVisual.Waiting, "等待手机连接", waitingHint(status))
         }
 
-        if (status.connected && !problem) {
+        if (selected != null && !problem) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile("延迟", "${status.rttMs} ms", Modifier.weight(1f))
-                MetricTile("码率", "%.1f Mbps".format(status.kbps / 1000.0), Modifier.weight(1f))
-                MetricTile("帧率", "${status.measuredFps.toInt()} fps", Modifier.weight(1f))
+                MetricTile("延迟", "${selected.rttMs} ms", Modifier.weight(1f))
+                MetricTile("码率", "%.1f Mbps".format(selected.kbps / 1000.0), Modifier.weight(1f))
+                MetricTile("帧率", "${selected.measuredFps.toInt()} fps", Modifier.weight(1f))
             }
-            if (status.encodeW != status.displayW) {
+            if (selected.encodeW != selected.displayW) {
                 Text(
-                    "网络受限，当前编码 ${status.encodeW}×${status.encodeH}",
+                    "网络受限，当前编码 ${selected.encodeW}×${selected.encodeH}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
@@ -133,15 +153,59 @@ fun ConsoleScreen(
             UpdateCard(update, actions.onInstallUpdate, { hiddenUpdate = update.version })
         }
 
-        val set = status.settings
+        // Connected devices each have their own. Without any, these are what a new one starts with.
+        val set = selected?.settings ?: status.settings
+        val allowWireless = status.settings.allowWireless
         SectionCard {
+            if (status.devices.size > 1 && selected != null) {
+                Text(
+                    "${selected.name.ifEmpty { "Android" }} 的显示设置",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             DisplaySettings(
-                status.options,
-                DisplayValue(set.mirror, set.width, set.height, set.hz, set.scale, set.maxKbps),
+                selected?.options ?: status.options,
+                DisplayValue(set.mirror, set.width, set.height, set.hz, set.scale, set.maxKbps, set.fill),
                 showQuality = true,
                 enabled = status.reachable,
-                onChange = { actions.onSetDisplay(set.copy(mirror = it.mirror, width = it.width, height = it.height, hz = it.hz, scale = it.scale, maxKbps = it.maxKbps)) },
+                onChange = { actions.onSetDisplay(selected?.id, set.copy(allowWireless = allowWireless, fill = it.fill, mirror = it.mirror, width = it.width, height = it.height, hz = it.hz, scale = it.scale, maxKbps = it.maxKbps)) },
             )
+        }
+
+        // With one GPU and one way to encode on it, there is nothing to choose.
+        if (status.gpus.size > 1 || status.encoders.size > 1) {
+            SectionCard {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    if (status.gpus.size > 1) {
+                        SettingDropdownRow(
+                            SdIcons.AspectRatio,
+                            "虚拟屏显卡",
+                            if (status.vddGpuEditable) "所有副屏共用，更改时画面会中断几秒" else "这个驱动不是 SideDroid 安装的，不能更改",
+                            listOf(Choice("自动（推荐）", "")) + status.gpus.map { Choice(if (it.startsWith("Microsoft")) "微软软件渲染（很慢）" else it, it) },
+                            status.vddGpu,
+                            actions.onSetVddGpu,
+                            enabled = status.reachable && status.vddGpuEditable,
+                        )
+                    }
+                    SettingDropdownRow(
+                        SdIcons.Hd,
+                        "编码器",
+                        when {
+                            selected?.encoderFallback == true -> "所选编码器不可用，已改用自动"
+                            set.encoder.startsWith("sw|") -> "用 CPU 编码，只适合没有可用显卡时"
+                            selected?.crossAdapter == true -> "和画面不在同一张显卡上，占用更高"
+                            selected != null && status.devices.size > 1 -> "只作用于 ${selected.name.ifEmpty { "这台设备" }}"
+                            else -> "把画面压缩成视频流"
+                        },
+                        listOf(Choice("自动（推荐）", "")) + status.encoders.map { Choice(it.label, it.id) },
+                        set.encoder,
+                        { actions.onSetDisplay(selected?.id, set.copy(allowWireless = allowWireless, encoder = it)) },
+                        enabled = status.reachable,
+                    )
+                }
+            }
         }
 
         SectionCard {
@@ -154,9 +218,9 @@ fun ConsoleScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(set.allowWireless, { actions.onSetDisplay(set.copy(allowWireless = it)) }, enabled = status.reachable)
+                Switch(allowWireless, { actions.onSetDisplay(selected?.id, set.copy(allowWireless = it)) }, enabled = status.reachable)
             }
-            if (set.allowWireless) {
+            if (allowWireless) {
                 status.paired.forEach { d ->
                     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -179,6 +243,30 @@ fun ConsoleScreen(
                 }
             }
         }
+
+        SectionCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("开机时打开控制台", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "手机随时都能连接，这项只决定是否打开这个窗口",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(status.consoleAutostart, actions.onSetConsoleAutostart, enabled = status.reachable)
+            }
+        }
+    }
+
+    if (status.reachable && !status.consoleAutostartAsked && status.pairingCode.isEmpty()) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("开机时打开控制台？") },
+            text = { Text("以后可以在设置里更改。") },
+            confirmButton = { TextButton(onClick = { actions.onSetConsoleAutostart(true) }) { Text("打开") } },
+            dismissButton = { TextButton(onClick = { actions.onSetConsoleAutostart(false) }) { Text("不用") } },
+        )
     }
 
     if (status.pairingCode.isNotEmpty()) {

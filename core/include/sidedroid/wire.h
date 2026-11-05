@@ -107,6 +107,9 @@ struct DisplayMode {
 };
 
 // Client -> host: what this device is and what it can show.
+// A Bye from the host may carry a reason. Older clients ignore it.
+constexpr uint8_t kByeHostFull = 1;
+
 struct Hello {
     uint16_t protocol = kProtocolVersion;
     std::string deviceName;
@@ -122,6 +125,13 @@ struct Hello {
 
 // Host -> client: what is being streamed now. Sent before the first frame and
 // whenever anything here changes.
+// What a client does with a picture of another shape than its screen.
+constexpr uint8_t kFillFit = 0;      // all of it, with bars where it falls short
+constexpr uint8_t kFillCrop = 1;     // no bars, with the edges cut off
+constexpr uint8_t kFillStretch = 2;  // no bars, out of shape
+constexpr uint8_t kFillTile = 3;     // actual size, repeated
+constexpr uint8_t kFillKeep = 0xFF;
+
 struct Config {
     uint16_t displayWidth = 0;
     uint16_t displayHeight = 0;
@@ -136,6 +146,7 @@ struct Config {
     uint16_t manualHeight = 0;
     uint16_t manualHz = 0;
     uint16_t manualScale = 0;  // percent, 0 means the recommended one
+    uint8_t fill = kFillFit;
 };
 
 struct FrameHeader {
@@ -181,6 +192,7 @@ struct SetDisplay {
     uint32_t maxBitrateKbps = 0;  // 0 means automatic, kKeepBitrate leaves it alone
     uint8_t mirror = kMirrorKeep;
     uint16_t scale = kKeepScale;  // percent, 0 means the recommended one
+    uint8_t fill = kFillKeep;
 };
 
 struct Size {

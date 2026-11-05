@@ -131,12 +131,6 @@ bool vddMonitorPresent() {
     });
 }
 
-bool vddOnDesktop() {
-    DisplayLayout active;
-    if (!queryActiveLayout(active)) return false;
-    return std::any_of(active.paths.begin(), active.paths.end(), [](const auto& p) { return isVddPath(p); });
-}
-
 bool queryLayoutWithoutVdd(DisplayLayout& out) {
     DisplayLayout active;
     if (!queryActiveLayout(active)) return false;
@@ -162,11 +156,11 @@ struct DpiScaleSet {
 // All the steps Windows counts through, whichever of them our menus offer.
 constexpr uint16_t kWindowsScales[] = {100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500};
 
-bool findVddSource(DISPLAYCONFIG_PATH_SOURCE_INFO* out) {
+bool findVddSource(const std::wstring& monitor, DISPLAYCONFIG_PATH_SOURCE_INFO* out) {
     DisplayLayout active;
     if (!queryActiveLayout(active)) return false;
     for (const auto& p : active.paths) {
-        if (isVddPath(p)) {
+        if (targetPathOf(p) == monitor) {
             *out = p.sourceInfo;
             return true;
         }
@@ -185,19 +179,19 @@ bool queryDpi(const DISPLAYCONFIG_PATH_SOURCE_INFO& src, DpiScaleGet* g) {
 
 }  // namespace
 
-uint16_t getVddScale() {
+uint16_t getVddScale(const std::wstring& monitor) {
     DISPLAYCONFIG_PATH_SOURCE_INFO src{};
     DpiScaleGet g;
-    if (!findVddSource(&src) || !queryDpi(src, &g)) return 0;
+    if (!findVddSource(monitor, &src) || !queryDpi(src, &g)) return 0;
     const int index = -g.minRelative + g.currentRelative;
     if (index < 0 || index >= static_cast<int>(std::size(kWindowsScales))) return 0;
     return kWindowsScales[index];
 }
 
-bool setVddScale(uint16_t percent) {
+bool setVddScale(const std::wstring& monitor, uint16_t percent) {
     DISPLAYCONFIG_PATH_SOURCE_INFO src{};
     DpiScaleGet g;
-    if (!findVddSource(&src) || !queryDpi(src, &g)) return false;
+    if (!findVddSource(monitor, &src) || !queryDpi(src, &g)) return false;
     int target = -1;
     for (int i = 0; i < static_cast<int>(std::size(kWindowsScales)); ++i)
         if (kWindowsScales[i] == percent) target = i;
@@ -220,38 +214,93 @@ bool setVddScale(uint16_t percent) {
     return true;
 }
 
-std::wstring isolateVdd() {
+std::vector<std::wstring> listVddMonitors() {
+    std::set<std::wstring> found;
+    DisplayLayout all;
+    if (queryLayout(QDC_ALL_PATHS, all)) {
+        for (const auto& p : all.paths) {
+            if (!p.targetInfo.targetAvailable) continue;
+            auto path = targetPathOf(p);
+            if (isVddMonitorId(path)) found.insert(std::move(path));
+        }
+    }
+    return {found.begin(), found.end()};
+}
+
+std::wstring vddMonitorSource(const std::wstring& monitor) {
+    DisplayLayout active;
+    if (!queryActiveLayout(active)) return {};
+    for (const auto& p : active.paths)
+        if (targetPathOf(p) == monitor) return sourceNameOf(p);
+    return {};
+}
+
+bool layoutHasMonitor(const DisplayLayout& layout, const std::wstring& monitor) {
+    return std::any_of(layout.paths.begin(), layout.paths.end(), [&](const auto& p) { return targetPathOf(p) == monitor; });
+}
+
+bool removeVddMonitor(const std::wstring& monitor) {
+    DisplayLayout active;
+    if (!queryActiveLayout(active)) return false;
+    if (!layoutHasMonitor(active, monitor)) return true;
+    return applyLayout(layoutWithout(active, [&](const auto& p) { return targetPathOf(p) == monitor; }), false);
+}
+
+std::wstring isolateVdd(const std::wstring& monitor, const std::vector<std::wstring>& keep) {
     DisplayLayout active;
     if (!queryActiveLayout(active)) return {};
 
-    // Already on the desktop with a source to itself: nothing to change.
-    for (const auto& p : active.paths) {
-        if (!isVddPath(p)) continue;
-        const auto sharing = std::count_if(active.paths.begin(), active.paths.end(), [&](const auto& o) {
+    const auto stray = [&](const DISPLAYCONFIG_PATH_INFO& p) {
+        const auto path = targetPathOf(p);
+        return isVddMonitorId(path) && path != monitor && std::find(keep.begin(), keep.end(), path) == keep.end();
+    };
+    const auto ownSource = [](const DisplayLayout& l, const DISPLAYCONFIG_PATH_INFO& p) {
+        return std::count_if(l.paths.begin(), l.paths.end(), [&](const auto& o) {
             return sameAdapter(o.sourceInfo.adapterId, p.sourceInfo.adapterId) && o.sourceInfo.id == p.sourceInfo.id;
-        });
-        if (sharing == 1) return sourceNameOf(p);
+        }) == 1;
+    };
+
+    // Already on the desktop with a source to itself, and no monitor there without
+    // a device behind it: nothing to change.
+    if (std::none_of(active.paths.begin(), active.paths.end(), stray)) {
+        for (const auto& p : active.paths)
+            if (targetPathOf(p) == monitor && ownSource(active, p)) return sourceNameOf(p);
     }
 
-    DisplayLayout others = layoutWithout(active, [](const auto& p) { return isVddPath(p); });
-    if (others.paths.empty()) {
+    // After a driver reload Windows may clone the driver's monitors onto a real display. While
+    // it does, it reports them on that display's adapter, with that source as the only choice,
+    // so they have to leave the clone group before any of them can get a source of its own.
+    // One that belongs to another device is put back by that device's session.
+    const auto cloned = [&](const DISPLAYCONFIG_PATH_INFO& p) { return isVddPath(p) && !ownSource(active, p); };
+    if (std::any_of(active.paths.begin(), active.paths.end(), cloned)) {
+        logf("taking virtual displays out of a clone group");
+        if (!applyLayout(layoutWithout(active, cloned), false)) return {};
+        Sleep(500);
+        if (!queryActiveLayout(active)) return {};
+    }
+
+    DisplayLayout others = layoutWithout(active, [&](const auto& p) { return targetPathOf(p) == monitor || stray(p); });
+    if (std::none_of(others.paths.begin(), others.paths.end(), [](const auto& p) { return !isVddPath(p); })) {
         logf("no other display is active; refusing to change the layout");
         return {};
     }
 
+    // A source on the driver's adapter that no other display is using. Paths can take a
+    // moment to settle after the layout changed.
     DisplayLayout all;
-    if (!queryLayout(QDC_ALL_PATHS, all)) return {};
-
-    // A source on the driver's adapter that no other display is using.
     const DISPLAYCONFIG_PATH_INFO* candidate = nullptr;
-    for (const auto& p : all.paths) {
-        if (!p.targetInfo.targetAvailable || !isVddPath(p)) continue;
-        const bool used = std::any_of(others.paths.begin(), others.paths.end(), [&](const auto& o) {
-            return sameAdapter(o.sourceInfo.adapterId, p.sourceInfo.adapterId) && o.sourceInfo.id == p.sourceInfo.id;
-        });
-        if (!used) {
-            candidate = &p;
-            break;
+    for (int attempt = 0; attempt < 10 && !candidate; ++attempt) {
+        if (attempt > 0) Sleep(200);
+        if (!queryLayout(QDC_ALL_PATHS, all)) return {};
+        for (const auto& p : all.paths) {
+            if (!p.targetInfo.targetAvailable || targetPathOf(p) != monitor) continue;
+            const bool used = std::any_of(others.paths.begin(), others.paths.end(), [&](const auto& o) {
+                return sameAdapter(o.sourceInfo.adapterId, p.sourceInfo.adapterId) && o.sourceInfo.id == p.sourceInfo.id;
+            });
+            if (!used) {
+                candidate = &p;
+                break;
+            }
         }
     }
     if (!candidate) {
@@ -270,13 +319,8 @@ std::wstring isolateVdd() {
     // The source a display ended up on is only certain once Windows reports it.
     DisplayLayout after;
     if (!queryActiveLayout(after)) return {};
-    for (const auto& p : after.paths) {
-        if (!isVddPath(p)) continue;
-        const auto sharing = std::count_if(after.paths.begin(), after.paths.end(), [&](const auto& o) {
-            return sameAdapter(o.sourceInfo.adapterId, p.sourceInfo.adapterId) && o.sourceInfo.id == p.sourceInfo.id;
-        });
-        if (sharing == 1) return sourceNameOf(p);
-    }
+    for (const auto& p : after.paths)
+        if (targetPathOf(p) == monitor && ownSource(after, p)) return sourceNameOf(p);
     logf("virtual display is still sharing a source after the layout change");
     return {};
 }

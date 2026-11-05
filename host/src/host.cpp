@@ -1,6 +1,7 @@
 #include "host.h"
 
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 #include <vector>
 
@@ -8,12 +9,17 @@
 #include "display.h"
 #include "encoder.h"
 #include "log.h"
+#include "vdd_device.h"
 
 #include <shellapi.h>
 
 namespace sd {
 
 namespace {
+constexpr size_t kMaxConnections = kMaxDevices + 4;  // including those still in the handshake
+constexpr int kEncoderFailuresBeforeGivingUp = 3;
+constexpr int kFramesThatProveAnEncoder = 120;
+constexpr int kFramesToWaitForKeyframe = 30;
 constexpr uint64_t kPairingLifetimeUs = 120'000'000;
 constexpr int kPairingMaxAttempts = 5;
 constexpr uint64_t kDetachGraceUs = 5'000'000;
@@ -27,6 +33,11 @@ const char* codecName(uint8_t c) { return c == kCodecHevc ? "HEVC" : "H.264"; }
 
 bool sameLuid(const LUID& a, const LUID& b) { return a.LowPart == b.LowPart && a.HighPart == b.HighPart; }
 
+// Test tools have no identity, so there is nothing to recognise them by.
+bool hasIdentity(const ClientId& id) {
+    return std::any_of(id.begin(), id.end(), [](uint8_t b) { return b != 0; });
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -36,6 +47,14 @@ class Session {
 public:
     Session(Host& host, Socket&& sock, const HandshakeResult& hs, bool loopback)
         : host_(host), keys_(hs.keys), mode_(hs.mode), clientId_(hs.clientId), loopback_(loopback) {
+        if (hasIdentity(clientId_)) {
+            id_ = toHex(clientId_.data(), clientId_.size());
+            settings_ = host_.store().deviceSettings(clientId_);
+        } else {
+            static std::atomic<uint32_t> next{1};
+            id_ = "connection-" + std::to_string(next.fetch_add(1));
+            copyDisplayDefaults(host_.currentSettings(), settings_);
+        }
         peerIp_ = sock.peerIpv4();
         sock.setBuffers(512 * 1024, 0);
         channel_ = std::make_unique<SecureChannel>(std::move(sock), keys_.tcpH2C, keys_.tcpC2H);
@@ -47,8 +66,71 @@ public:
         channel_->shutdown();
         queueCv_.notify_all();
     }
-    void settingsChanged() { displayDirty_ = true; }
+    // Reads what the device says first: closing with unread data could lose the message.
+    void refuseFull() {
+        Bytes first;
+        channel_->recv(first);
+        channel_->send(Bytes{static_cast<uint8_t>(MsgType::Bye), kByeHostFull});
+        channel_->shutdown();
+    }
     const std::string& deviceName() const { return hello_.deviceName; }
+    const std::string& id() const { return id_; }
+
+    DeviceSettings settings() const {
+        std::lock_guard<std::mutex> lock(settingsMutex_);
+        return settings_;
+    }
+    // What the user chose for this device. Nothing happens if nothing differs.
+    void displaysChanged() { displayDirty_ = true; }
+    // Ends the capture on a virtual display, if there is one, and says whether none is left.
+    bool stopVirtualCapture() {
+        displayDirty_ = true;
+        return !capturingVirtual_;
+    }
+    void chooseDisplay(uint16_t width, uint16_t height, uint16_t hz, uint32_t maxKbps, bool mirror, uint16_t scale, const std::string& encoder, uint8_t fill) {
+        if (fill > kFillTile) fill = kFillFit;
+        bool streamSame = false;
+        {
+            std::lock_guard<std::mutex> lock(settingsMutex_);
+            streamSame = settings_.width == width && settings_.height == height && settings_.hz == hz && settings_.maxKbps == maxKbps &&
+                         settings_.mirror == mirror && settings_.scalePercent == scale && settings_.encoder == encoder;
+            if (streamSame && settings_.fill == fill) return;
+            settings_.fill = fill;
+            settings_.width = width;
+            settings_.height = height;
+            settings_.hz = hz;
+            settings_.maxKbps = maxKbps;
+            settings_.mirror = mirror;
+            settings_.scalePercent = scale;
+            settings_.encoder = encoder;
+            settings_.custom = true;
+            saveSettings();
+        }
+        // How the client shows the picture is no reason to interrupt making it.
+        if (streamSame) fillDirty_ = true;
+        else displayDirty_ = true;
+    }
+    // What this device will ask for the next time it sets up its display.
+    DisplayMode wantedMode() const {
+        const DeviceSettings s = settings();
+        const SetDisplay manual{s.width, s.height, s.hz, s.maxKbps};
+        const Size pc = primaryDisplaySize();
+        return chooseMode(hello_, viewportW_.load(), viewportH_.load(), manual, pc.width, pc.height);
+    }
+    void followDefaults(const Settings& s) {
+        {
+            std::lock_guard<std::mutex> lock(settingsMutex_);
+            copyDisplayDefaults(s, settings_);
+            settings_.custom = false;
+        }
+        displayDirty_ = true;
+    }
+    LiveStatus live() {
+        std::lock_guard<std::mutex> lock(liveMutex_);
+        LiveStatus l = live_;
+        l.id = id_;
+        return l;
+    }
 
 private:
     void videoLoop();
@@ -61,11 +143,32 @@ private:
     bool prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* mode);
     uint32_t bitrateCap(const DisplayMode& m) const;
     DisplayOptions displayOptions() const;
+    void publish(const std::function<void(LiveStatus&)>& edit) {
+        std::lock_guard<std::mutex> lock(liveMutex_);
+        edit(live_);
+    }
+    void saveSettings() {  // settingsMutex_ held
+        if (hasIdentity(clientId_)) host_.store().setDeviceSettings(clientId_, settings_);
+    }
+    void rememberPlace(const RECT& r) {
+        std::lock_guard<std::mutex> lock(settingsMutex_);
+        if (settings_.left == r.left && settings_.top == r.top && settings_.right == r.right && settings_.bottom == r.bottom) return;
+        settings_.left = r.left;
+        settings_.top = r.top;
+        settings_.right = r.right;
+        settings_.bottom = r.bottom;
+        saveSettings();
+    }
 
     Host& host_;
     SessionKeys keys_;
     AuthMode mode_;
     ClientId clientId_;
+    std::string id_;
+    mutable std::mutex settingsMutex_;
+    DeviceSettings settings_;
+    std::mutex liveMutex_;
+    LiveStatus live_;
     bool loopback_;
     uint32_t peerIp_ = 0;
     std::unique_ptr<SecureChannel> channel_;
@@ -73,10 +176,18 @@ private:
 
     std::atomic<bool> running_{true};
     std::atomic<bool> displayDirty_{false};
+    std::atomic<bool> fillDirty_{false};
+    // Becomes true only under the display lock, so it stays false for whoever holds that lock.
+    std::atomic<bool> capturingVirtual_{false};
     std::atomic<bool> keyRequested_{true};
     std::atomic<uint16_t> viewportW_{0}, viewportH_{0};
     uint16_t recommendedScale_ = 100, currentScale_ = 100;  // video thread only
     bool vddPlaced_ = false;  // video thread only: this session has put the display on the desktop
+    std::wstring monitor_;  // video thread only
+    uint32_t nextFrameId_ = 0;  // video thread only
+    std::vector<std::string> badEncoders_;  // video thread only: kinds that keep failing here
+    std::string failingEncoder_;            // video thread only
+    int encoderFailures_ = 0;               // video thread only
 
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
@@ -118,8 +229,8 @@ DisplayOptions Session::displayOptions() const {
 }
 
 uint32_t Session::bitrateCap(const DisplayMode& m) const {
-    auto s = host_.currentSettings();
-    if (s.maxKbps) return s.maxKbps;
+    const uint32_t chosen = settings().maxKbps;
+    if (chosen) return chosen;
     // About 0.12 bits per pixel, which is clean for desktop content in HEVC,
     // with a tighter ceiling on shared radio than on a USB cable.
     double pixelsPerSecond = static_cast<double>(m.width) * m.height * m.hz;
@@ -221,10 +332,8 @@ void Session::handleNack(const Nack& n) {
 
 bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* mode) {
     const auto& opts = host_.options();
-    auto s = host_.currentSettings();
-    SetDisplay manual{s.width, s.height, s.hz, s.maxKbps};
-    const Size pc = primaryDisplaySize();
-    DisplayMode want = chooseMode(hello_, viewportW_.load(), viewportH_.load(), manual, pc.width, pc.height);
+    const DeviceSettings s = settings();
+    DisplayMode want = wantedMode();
     *mode = want;
 
     if (!opts.sourceOverride.empty() && !opts.useVirtualDisplayInTest) {
@@ -233,10 +342,11 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
         return true;
     }
 
+    auto displays = host_.lockDisplays();
     if (s.mirror) {
         // Mirroring reads the main display as it is, so nothing about it changes.
         vddPlaced_ = false;
-        host_.restoreLayoutNow();
+        host_.releaseDisplay(this, true);
         for (const auto& o : listOutputs()) {
             if (o.primary) {
                 *device = o.deviceName;
@@ -248,15 +358,23 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
         return false;
     }
 
+    bool changedDriver = false;
+    const char* problem = host_.prepareDriver(this, want, &changedDriver);
+    if (problem) publish([&](LiveStatus& l) { l.error = problem; });
     if (!vddMonitorPresent()) {
-        host_.publishStatus([](LiveStatus& l) { l.error = "virtual_display_missing"; });
+        if (!problem) publish([](LiveStatus& l) { l.error = "virtual_display_missing"; });
         logf("virtual display driver not found");
         return false;
     }
     if (!host_.saveLayoutBeforeChange()) return false;
-    const std::wstring isolated = isolateVdd();
+    monitor_ = host_.claimDisplay(this, clientId_);
+    if (monitor_.empty()) {
+        publish([](LiveStatus& l) { l.error = "virtual_display_count"; });
+        return false;
+    }
+    const std::wstring isolated = isolateVdd(monitor_, host_.claimedDisplays());
     if (isolated.empty()) {
-        host_.publishStatus([](LiveStatus& l) { l.error = "virtual_display_layout"; });
+        publish([](LiveStatus& l) { l.error = "virtual_display_layout"; });
         return false;
     }
     auto vdd = findOutputByName(isolated);
@@ -266,6 +384,7 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
     }
     *device = vdd->deviceName;
     *isVirtual = true;
+    logf("%s shows %s on %s", hello_.deviceName.c_str(), narrow(monitor_).c_str(), narrow(*device).c_str());
 
     // While it is showing, the user may have moved it, so where it is now counts.
     // Coming back onto the desktop, Windows picks a place, so the last known one counts.
@@ -275,54 +394,57 @@ bool Session::prepareOutput(std::wstring* device, bool* isVirtual, DisplayMode* 
     if (vddPlaced_ && vdd->attached) {
         previous = vdd->rect;
         hasPrevious = true;
-    } else if (s.vddRight > s.vddLeft && s.vddBottom > s.vddTop) {
-        previous = {s.vddLeft, s.vddTop, s.vddRight, s.vddBottom};
+    } else if (s.right > s.left && s.bottom > s.top) {
+        previous = {s.left, s.top, s.right, s.bottom};
         hasPrevious = true;
     }
 
+    // Modes can take a moment to show up after the driver has restarted.
+    for (int i = 0; changedDriver && i < 30 && running_ && !outputHasMode(*device, want); ++i) Sleep(100);
     if (!outputHasMode(*device, want)) {
-        // First sight of this phone's resolution: teach it to the driver.
-        std::vector<DisplayMode> modes{want, {want.height, want.width, want.hz}};
-        bool changed = false;
-        if (!ensureVddModes(modes, &changed)) {
-            host_.publishStatus([](LiveStatus& l) { l.error = "virtual_display_config_denied"; });
-        } else if (changed) {
-            logf("added %dx%d@%d to driver config; reloading", want.width, want.height, want.hz);
-            vddCommand(L"RELOAD_DRIVER");
-            for (int i = 0; i < 50 && running_ && !outputHasMode(*device, want); ++i) {
-                Sleep(100);
-                if (auto v = findVddOutput()) *device = v->deviceName;
-            }
+        // Keep the session useful: closest mode of the same orientation that exists.
+        auto modes2 = listModes(*device);
+        const bool portrait = want.height > want.width;
+        std::optional<DisplayMode> best;
+        int bestScore = INT_MAX;
+        for (const auto& m : modes2) {
+            if ((m.height > m.width) != portrait) continue;
+            int score = abs(m.width - want.width) + abs(m.height - want.height) + abs(m.hz - want.hz) * 4;
+            if (score < bestScore) { bestScore = score; best = m; }
         }
-        if (!outputHasMode(*device, want)) {
-            // Keep the session useful: closest mode of the same orientation that exists.
-            auto modes2 = listModes(*device);
-            const bool portrait = want.height > want.width;
-            std::optional<DisplayMode> best;
-            int bestScore = INT_MAX;
-            for (const auto& m : modes2) {
-                if ((m.height > m.width) != portrait) continue;
-                int score = abs(m.width - want.width) + abs(m.height - want.height) + abs(m.hz - want.hz) * 4;
-                if (score < bestScore) { bestScore = score; best = m; }
-            }
-            if (!best) {
-                logf("no usable display mode for %dx%d@%d", want.width, want.height, want.hz);
-                return false;
-            }
-            logf("using closest mode %dx%d@%d", best->width, best->height, best->hz);
-            *mode = *best;
+        if (!best) {
+            logf("no usable display mode for %dx%d@%d", want.width, want.height, want.hz);
+            return false;
         }
+        logf("using closest mode %dx%d@%d", best->width, best->height, best->hz);
+        *mode = *best;
     }
     if (!attachOutput(*device, *mode, hasPrevious ? &previous : nullptr)) return false;
     vddPlaced_ = true;
-    if (RECT placed; outputRect(*device, &placed)) host_.store().setVddRect(placed.left, placed.top, placed.right, placed.bottom);
+    capturingVirtual_ = true;
+    if (RECT placed; outputRect(*device, &placed)) rememberPlace(placed);
 
     // Before capture starts: a change of scale would interrupt it.
     recommendedScale_ = recommendedScale(mode->width, mode->height, hello_.densityDpi);
     const uint16_t wantScale = s.scalePercent ? s.scalePercent : recommendedScale_;
-    if (!setVddScale(wantScale)) logf("could not set display scale to %d%%", wantScale);
-    currentScale_ = getVddScale();
+    // Just after the driver has restarted, this can fail for a moment.
+    bool scaleSet = setVddScale(monitor_, wantScale);
+    for (int i = 0; !scaleSet && changedDriver && i < 10 && running_; ++i) {
+        Sleep(100);
+        scaleSet = setVddScale(monitor_, wantScale);
+    }
+    if (!scaleSet) logf("could not set display scale to %d%%", wantScale);
+    currentScale_ = getVddScale(monitor_);
     logf("display scale %d%% (wanted %d%%, recommended %d%%)", currentScale_, wantScale, recommendedScale_);
+
+    // After the driver has restarted, Windows goes on rearranging and can take a monitor off the
+    // desktop again. Going on would capture whichever monitor gets that source next: a device
+    // showing another device's picture, while that one cannot capture anything.
+    if (vddMonitorSource(monitor_) != *device) {
+        logf("%s lost its place on the desktop; setting it up again", hello_.deviceName.c_str());
+        capturingVirtual_ = false;
+        return false;
+    }
     return true;
 }
 
@@ -354,6 +476,7 @@ void Session::videoLoop() {
     int openFailures = 0;
     while (running_) {
         displayDirty_ = false;
+        capturingVirtual_ = false;  // the capture of the last round is closed by now
 
         std::wstring device;
         bool isVirtual = false;
@@ -367,7 +490,7 @@ void Session::videoLoop() {
         DesktopCapture capture;
         bool opened = false;
         for (int i = 0; i < 40 && running_ && !displayDirty_; ++i) {
-            if (capture.open(device)) { opened = true; break; }
+            if (capture.open(device, !isVirtual)) { opened = true; break; }
             Sleep(100);
         }
         if (!opened) {
@@ -426,7 +549,16 @@ void Session::videoLoop() {
         ComPtr<ID3D11Device> encDev = capture.device();
         ComPtr<ID3D11DeviceContext> encCtx = capture.context();
         std::unique_ptr<Encoder> encoder;
-        auto tryOn = [&](ID3D11Device* dev) {
+        // A GPU's own interface first, as it does what is asked of it most directly. Media
+        // Foundation is what remains for the GPUs and drivers those do not cover.
+        using Create = std::unique_ptr<Encoder> (*)(const EncoderConfig&);
+        static const std::pair<const char*, Create> kHardwareEncoders[] = {
+            {"nvenc", createNvencEncoder}, {"amf", createAmfEncoder}, {"qsv", createQsvEncoder}, {"mf", createMfEncoder}};
+        const auto isBad = [&](const char* kind) { return std::find(badEncoders_.begin(), badEncoders_.end(), kind) != badEncoders_.end(); };
+        auto tryOn = [&](ID3D11Device* dev, const std::string& onlyKind = {}) {
+            if (onlyKind == "sw") return false;
+            // WARP has nothing to encode with, and some drivers do not expect to be asked.
+            if (adapterVendor(dev) == kVendorMicrosoft) return false;
             EncoderConfig ec;
             ec.device = dev;
             ec.width = encW;
@@ -436,14 +568,72 @@ void Session::videoLoop() {
             for (uint8_t c : {codec, static_cast<uint8_t>(kCodecH264)}) {
                 if (!(hello_.codecs & c)) continue;
                 ec.codec = c;
-                encoder = createNvencEncoder(ec);
-                if (!encoder) encoder = createMfEncoder(ec);
-                if (encoder) { codec = c; return true; }
+                for (const auto& [kind, create] : kHardwareEncoders) {
+                    if ((!onlyKind.empty() && onlyKind != kind) || isBad(kind)) continue;
+                    encoder = create(ec);
+                    if (encoder) { codec = c; return true; }
+                }
             }
             return false;
         };
         bool crossAdapter = false;
-        if (!tryOn(capture.device())) {
+
+        // What the user chose comes first. If that does not work, the stream still should.
+        const std::vector<GpuInfo> gpus = listGpus();
+        const auto gpuNameOf = [&](const LUID& luid) {
+            for (const auto& g : gpus)
+                if (sameLuid(g.luid, luid)) return narrow(g.name);
+            return std::string{};
+        };
+        std::string captureGpu = gpuNameOf(capture.adapterLuid()), encoderGpu = captureGpu;
+        const std::string chosen = settings().encoder;
+        bool encoderFallback = false;
+        // Software first among codecs in H.264, which takes far less of a CPU than HEVC does.
+        const auto trySoftware = [&] {
+            if (isBad("sw")) return false;
+            EncoderConfig ec;
+            ec.width = encW;
+            ec.height = encH;
+            ec.fps = fps;
+            ec.kbps = startTarget.bitrateKbps;
+            for (uint8_t c : {static_cast<uint8_t>(kCodecH264), static_cast<uint8_t>(kCodecHevc)}) {
+                if (!(hello_.codecs & c)) continue;
+                ec.codec = c;
+                encoder = createSoftwareEncoder(ec);
+                if (encoder) {
+                    codec = c;
+                    encoderGpu = "CPU";
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (const auto bar = chosen.find('|'); bar != std::string::npos) {
+            const std::string kind = chosen.substr(0, bar), gpu = chosen.substr(bar + 1);
+            if (kind == "sw") {
+                trySoftware();
+            } else if (gpu == captureGpu) {
+                tryOn(capture.device(), kind);
+            } else {
+                for (const auto& g : gpus) {
+                    if (narrow(g.name) != gpu) continue;
+                    ComPtr<ID3D11DeviceContext> ctx;
+                    auto dev = createDeviceOnAdapter(g.luid, &ctx);
+                    if (dev && tryOn(dev.Get(), kind)) {
+                        encDev = dev;
+                        encCtx = ctx;
+                        crossAdapter = true;
+                        encoderGpu = gpu;
+                    }
+                    break;
+                }
+            }
+            if (!encoder) {
+                logf("the chosen encoder %s is not available; choosing automatically", chosen.c_str());
+                encoderFallback = true;
+            }
+        }
+        if (!encoder && !tryOn(capture.device())) {
             for (const auto& [luid, vendor] : listHardwareAdapters()) {
                 if (sameLuid(luid, capture.adapterLuid())) continue;
                 ComPtr<ID3D11DeviceContext> ctx;
@@ -452,17 +642,21 @@ void Session::videoLoop() {
                     encDev = dev;
                     encCtx = ctx;
                     crossAdapter = true;
+                    encoderGpu = gpuNameOf(luid);
                     break;
                 }
             }
         }
+        // Better a slow picture than none: a virtual machine has no hardware encoder at all.
+        if (!encoder && trySoftware()) logf("no hardware encoder available: encoding on the CPU");
         if (!encoder) {
-            logf("no hardware encoder available");
-            host_.publishStatus([](LiveStatus& l) { l.error = "no_encoder"; });
+            logf("no encoder available");
+            publish([](LiveStatus& l) { l.error = "no_encoder"; });
             Sleep(2000);
             continue;
         }
 
+        const bool toMemory = encoder->wantsMemoryInput();
         CrossAdapterCopy cross;
         if (crossAdapter && !cross.init(capture.device(), capture.context(), encDev.Get(), encCtx.Get(), capW, capH)) {
             logf("cross-adapter copy init failed");
@@ -470,11 +664,20 @@ void Session::videoLoop() {
             continue;
         }
         Nv12Converter conv;
-        if (!conv.init(encDev.Get(), encCtx.Get(), capW, capH, encW, encH)) {
-            logf("video processor init failed");
+        CpuNv12Converter cpuConv;
+        const bool converterReady = toMemory ? cpuConv.init(capture.device(), capture.context(), capW, capH, encW, encH)
+                                             : conv.init(encDev.Get(), encCtx.Get(), capW, capH, encW, encH);
+        if (!converterReady) {
+            logf("colour converter init failed");
             Sleep(1000);
             continue;
         }
+        const bool paceByOutput = encoder->overshootsTarget();
+        uint64_t nextEncodeAllowedUs = 0;
+        int framesFromThisEncoder = 0;
+        int framesSinceKeyRequest = -1;  // not waiting for one
+        const bool breakThisEncoder = host_.options().testBreakEncoder.find(encoder->kind()) != std::string::npos;
+        const bool deafThisEncoder = host_.options().testDeafEncoder == encoder->kind();
 
         logf("pipeline: %dx%d -> %dx%d @%d %s %s %u kbps%s", capW, capH, encW, encH, fps, encoder->name(),
              codecName(codec), startTarget.bitrateKbps, crossAdapter ? " (cross-adapter)" : "");
@@ -488,17 +691,19 @@ void Session::videoLoop() {
         cfg.codec = codec;
         cfg.bitrateKbps = startTarget.bitrateKbps;
         {
-            const auto s = host_.currentSettings();
+            const DeviceSettings s = settings();
             cfg.mirror = s.mirror;
             cfg.manualWidth = s.width;
             cfg.manualHeight = s.height;
             cfg.manualHz = s.hz;
             cfg.manualScale = s.scalePercent;
+            cfg.fill = s.fill;
         }
+        fillDirty_ = false;
         if (!channel_->send(encode(cfg)) || !channel_->send(encode(displayOptions()))) { requestStop(); return; }
         keyRequested_ = true;
 
-        host_.publishStatus([&](LiveStatus& l) {
+        publish([&](LiveStatus& l) {
             l.error.clear();
             l.displayW = capW;
             l.displayH = capH;
@@ -507,6 +712,10 @@ void Session::videoLoop() {
             l.encodeH = encH;
             l.fps = fps;
             l.encoder = encoder->name();
+            l.captureGpu = captureGpu;
+            l.encoderGpu = encoderGpu;
+            l.crossAdapter = crossAdapter;
+            l.encoderFallback = encoderFallback;
             l.codec = codecName(codec);
             l.kbps = startTarget.bitrateKbps;
             l.usingVirtualDisplay = isVirtual;
@@ -524,6 +733,12 @@ void Session::videoLoop() {
         uint32_t patternTick = 0;
 
         while (running_ && !displayDirty_) {
+            if (fillDirty_.exchange(false)) {
+                cfg.fill = settings().fill;
+                cfg.bitrateKbps = kbpsNow_.load();
+                if (!channel_->send(encode(cfg))) { requestStop(); return; }
+                keyRequested_ = true;  // a client may have a new surface to show it on
+            }
             if (targetDirty_.exchange(false)) {
                 RateTarget t;
                 {
@@ -531,10 +746,16 @@ void Session::videoLoop() {
                     t = target_;
                 }
                 if (t.scalePercent != scale || t.fps != fps) break;  // rebuild
-                if (t.bitrateKbps != appliedKbps && encoder->setBitrate(t.bitrateKbps)) {
+                if (t.bitrateKbps != appliedKbps) {
+                    // Without this the stream stays too large for the path. A new encoder
+                    // takes the new rate, at the cost of one keyframe.
+                    if (!encoder->setBitrate(t.bitrateKbps)) {
+                        logf("%s did not take %u kbps; rebuilding", encoder->name(), t.bitrateKbps);
+                        break;
+                    }
                     appliedKbps = t.bitrateKbps;
                     kbpsNow_ = appliedKbps;
-                    host_.publishStatus([&](LiveStatus& l) { l.kbps = appliedKbps; });
+                    publish([&](LiveStatus& l) { l.kbps = appliedKbps; });
                 }
             }
 
@@ -559,6 +780,11 @@ void Session::videoLoop() {
             // but nothing promises that. Touch must not depend on it.
             if (now - lastPlaceCheckUs >= kPlaceCheckUs) {
                 lastPlaceCheckUs = now;
+                // The same source can come to show another monitor, with no sign from the capture.
+                if (isVirtual && vddMonitorSource(monitor_) != device) {
+                    logf("%s is no longer on %s; rebuilding", hello_.deviceName.c_str(), narrow(device).c_str());
+                    break;
+                }
                 RECT r;
                 if (outputRect(device, &r) && !EqualRect(&r, &shownRect)) {
                     logf("display moved to %ld,%ld", r.left, r.top);
@@ -567,36 +793,63 @@ void Session::videoLoop() {
                         std::lock_guard<std::mutex> lock(touchMutex_);
                         if (touch_) touch_->setDisplayRect(r);
                     }
-                    if (isVirtual) host_.store().setVddRect(r.left, r.top, r.right, r.bottom);
+                    if (isVirtual) rememberPlace(r);
                 }
             }
 
             const bool dueByRate = now - lastEncodeUs >= frameIntervalUs * 9 / 10;
             const bool wantRepeat = repeats > 0 && dueByRate;
             const bool keepAlive = now - lastEncodeUs >= kIdleKeepAliveUs;
-            if (keyRequested_.load() || (unsent && dueByRate) || wantRepeat || keepAlive) {
+            // Fewer frames rather than more data than the path takes. A request for a keyframe
+            // waits as well: it is the largest kind, and what overran the path in the first place.
+            const bool heldBack = paceByOutput && now < nextEncodeAllowedUs;
+            if (!heldBack && (keyRequested_.load() || (unsent && dueByRate) || wantRepeat || keepAlive)) {
                 ID3D11Texture2D* tex = capture.texture();
                 if (crossAdapter) {
                     tex = cross.copy(tex);
                     if (!tex) break;
                 }
-                if (!conv.convert(tex)) {
+                if (toMemory ? !cpuConv.convert(tex) : !conv.convert(tex)) {
                     logf("colour conversion failed");
                     break;
                 }
                 const bool force = keyRequested_.exchange(false);
+                if (force && framesSinceKeyRequest < 0) framesSinceKeyRequest = 0;
                 const uint64_t captureUs = now;
-                bool encoded = encoder->encode(conv.output(), force, [&](const uint8_t* data, size_t size, bool key) {
+                const Encoder::Output deliver = [&](const uint8_t* data, size_t size, bool key) {
+                    if (key) framesSinceKeyRequest = -1;
+                    if (paceByOutput) nextEncodeAllowedUs = now + static_cast<uint64_t>(size) * 8000 / std::max<uint32_t>(kbpsNow_.load(), 1);
                     FrameHeader fh;
                     fh.captureUs = captureUs;
                     fh.keyframe = key;
-                    static std::atomic<uint32_t> seq{0};
-                    fh.frameId = seq.fetch_add(1);
+                    fh.frameId = nextFrameId_++;
                     enqueue(encodeFrame(fh, data, size), key);
-                });
+                };
+                const bool passOn = force && !deafThisEncoder;
+                bool encoded = toMemory ? encoder->encodeMemory(cpuConv.data(), passOn, deliver) : encoder->encode(conv.output(), passOn, deliver);
+                if (breakThisEncoder && framesFromThisEncoder >= 3) encoded = false;
                 if (!encoded) {
+                    // Failing right from the start, again and again, says this one does not
+                    // work here. The next round then goes on to the next encoder.
+                    const std::string kind = encoder->kind();
+                    if (framesFromThisEncoder < kFramesThatProveAnEncoder) {
+                        encoderFailures_ = kind == failingEncoder_ ? encoderFailures_ + 1 : 1;
+                        failingEncoder_ = kind;
+                        if (encoderFailures_ >= kEncoderFailuresBeforeGivingUp) {
+                            logf("%s keeps failing; not using it for this device any more", encoder->name());
+                            badEncoders_.push_back(kind);
+                            encoderFailures_ = 0;
+                        }
+                    }
                     logf("encode failed; rebuilding");
                     Sleep(100);
+                    break;
+                }
+                ++framesFromThisEncoder;
+                // A phone that lost its place cannot show anything until a keyframe comes. An
+                // encoder that ignores the request is replaced by one that starts on a keyframe.
+                if (framesSinceKeyRequest >= 0 && ++framesSinceKeyRequest > kFramesToWaitForKeyframe) {
+                    logf("%s ignored a request for a keyframe; rebuilding", encoder->name());
                     break;
                 }
                 encodeSumUs += monotonicUs() - now;
@@ -610,7 +863,7 @@ void Session::videoLoop() {
                 double avgMs = encodeCount ? encodeSumUs / 1000.0 / encodeCount : 0;
                 double seconds = (now - lastStatsUs) / 1e6;
                 double measured = encodeCount / seconds;
-                host_.publishStatus([&](LiveStatus& l) {
+                publish([&](LiveStatus& l) {
                     l.encodeMs = avgMs;
                     l.measuredFps = measured;
                 });
@@ -620,6 +873,7 @@ void Session::videoLoop() {
             }
         }
     }
+    capturingVirtual_ = false;
 }
 
 void Session::recvLoop() {
@@ -654,7 +908,7 @@ void Session::recvLoop() {
                 uint32_t total = s->packetsReceived + s->packetsLost;
                 const double loss = total ? 100.0 * s->packetsLost / total : 0;
                 const double kbpsSeen = s->windowMs ? s->bytes * 8.0 / s->windowMs : 0;
-                host_.publishStatus([&](LiveStatus& l) {
+                publish([&](LiveStatus& l) {
                     l.lossPercent = l.lossPercent * 0.8 + loss * 0.2;
                     l.measuredKbps = static_cast<uint32_t>(l.measuredKbps * 0.8 + kbpsSeen * 0.2);
                     l.rttMs = s->rttUs / 1000;
@@ -675,15 +929,10 @@ void Session::recvLoop() {
             break;
         case MsgType::SetDisplay:
             if (auto d = decodeSetDisplay(body)) {
-                Settings s = host_.currentSettings();
-                s.width = d->width;
-                s.height = d->height;
-                s.hz = d->hz;
-                if (d->maxBitrateKbps != kKeepBitrate) s.maxKbps = d->maxBitrateKbps;
-                if (d->mirror != kMirrorKeep) s.mirror = d->mirror == kMirrorOn;
-                if (d->scale != kKeepScale) s.scalePercent = d->scale;
-                host_.store().setSettings(s);
-                displayDirty_ = true;
+                const DeviceSettings s = settings();
+                chooseDisplay(d->width, d->height, d->hz, d->maxBitrateKbps != kKeepBitrate ? d->maxBitrateKbps : s.maxKbps,
+                              d->mirror != kMirrorKeep ? d->mirror == kMirrorOn : s.mirror, d->scale != kKeepScale ? d->scale : s.scalePercent, s.encoder,
+                              d->fill != kFillKeep ? d->fill : s.fill);
             }
             break;
         case MsgType::Nack:
@@ -752,7 +1001,7 @@ void Session::run() {
     }
 
     const char* transport = useUdp_ ? "wifi" : "usb";
-    host_.publishStatus([&](LiveStatus& l) {
+    publish([&](LiveStatus& l) {
         l = LiveStatus{};
         l.connected = true;
         l.device = hello_.deviceName;
@@ -775,29 +1024,27 @@ void Session::run() {
         std::lock_guard<std::mutex> lock(touchMutex_);
         touch_.reset();  // lifts anything still pressed
     }
-    host_.publishStatus([](LiveStatus& l) {
-        l = LiveStatus{};
-    });
-    logf("client disconnected");
+    host_.releaseDisplay(this, false);
+    logf("client disconnected: %s", hello_.deviceName.c_str());
 }
 
 // ---------------------------------------------------------------------------
 // Host
 // ---------------------------------------------------------------------------
-Host::Host(HostOptions opts) : opts_(std::move(opts)), adb_(opts_.port), live_(std::make_unique<LiveStatus>()) {}
+Host::Host(HostOptions opts) : opts_(std::move(opts)), adb_(opts_.port) {}
 
 Host::~Host() { stop(); }
 
-void Host::publishStatus(const std::function<void(LiveStatus&)>& edit) {
+void Host::setHostError(const std::string& error, bool onlyIfSame) {
     std::lock_guard<std::mutex> lock(statusMutex_);
-    edit(*live_);
+    if (onlyIfSame && hostError_ != error) return;
+    hostError_ = onlyIfSame ? std::string{} : error;
 }
 
 static std::wstring layoutFilePath() { return dataDir() + L"\\display-layout-to-restore.bin"; }
 
 bool Host::saveLayoutBeforeChange() {
-    std::lock_guard<std::mutex> lock(attachMutex_);
-    detachAtUs_ = 0;
+    auto lock = lockDisplays();
     if (layoutSaved_) return true;
     DisplayLayout layout;
     // A user who runs the driver on their own keeps it on the desktop afterwards.
@@ -819,12 +1066,202 @@ bool Host::saveLayoutBeforeChange() {
 }
 
 void Host::restoreLayoutNow() {
-    std::lock_guard<std::mutex> lock(attachMutex_);
-    detachAtUs_ = 0;
+    auto lock = lockDisplays();
     if (!layoutSaved_) return;
     if (applyLayout(savedLayout_, ownsDriver_)) logf("display layout restored");
     layoutSaved_ = false;
     DeleteFileW(layoutFilePath().c_str());
+}
+
+void Host::lastDisplayGone() {
+    restoreLayoutNow();
+    if (!driverOn_) return;
+    driverOn_ = false;
+    if (const auto error = askDisplayService("disable")) logf("cannot turn the virtual display off: %lu", *error);
+}
+
+bool Host::stopVirtualCaptures(const Session* self) {
+    std::vector<std::shared_ptr<Session>> others;
+    {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        for (auto& c : connections_)
+            if (c->session && c->session.get() != self) others.push_back(c->session);
+    }
+    for (int i = 0; i < 250; ++i) {
+        bool allStopped = true;
+        for (auto& s : others) allStopped = s->stopVirtualCapture() && allStopped;
+        if (allStopped) return true;
+        Sleep(20);
+    }
+    logf("a capture did not stop in time");
+    return false;
+}
+
+const char* Host::prepareDriver(const Session* session, const DisplayMode& want, bool* changedDriver) {
+    auto lock = lockDisplays();
+    *changedDriver = false;
+    ownsDriver_ = vddDriverIsOurs();  // the driver can have been installed since the start
+
+    std::vector<DisplayMode> keep;
+    bool known = false;
+    for (auto& [s, m] : modesInUse_) {
+        if (s == session) {
+            m = want;
+            known = true;
+        } else {
+            keep.push_back(m);
+            keep.push_back({m.height, m.width, m.hz});
+        }
+    }
+    if (!known) modesInUse_.emplace_back(session, want);
+
+    // One monitor per device, counting those still on their way here: every restart interrupts
+    // all of them, so devices arriving together must not each cause one. A device on its way
+    // out leaves a monitor that can be taken over.
+    const bool hasClaim = std::any_of(claims_.begin(), claims_.end(), [&](const auto& c) { return c.session == session; });
+    const auto countNeeded = [&] {
+        size_t needed = hasClaim ? 0 : 1;
+        for (const auto& c : claims_)
+            if (c.session) ++needed;
+        std::lock_guard<std::mutex> lock2(sessionMutex_);
+        size_t wanting = 0;
+        for (auto& c : connections_) {
+            // Mirroring needs no monitor. Before the session exists, assume it will want one.
+            if (c->holdsPlace && !(c->session && c->session->settings().mirror)) ++wanting;
+        }
+        return std::min(std::max(needed, wanting), kMaxDevices);
+    };
+    // While on, it keeps those it has: taking one away would interrupt everyone for nothing.
+    const size_t present = driverOn_ ? listVddMonitors().size() : 0;
+    size_t needed = countNeeded();
+    // About to change it. Devices that connect at the same moment are a few milliseconds behind.
+    if (ownsDriver_ && (!driverOn_ || needed > present)) {
+        Sleep(250);
+        needed = countNeeded();
+    }
+    const size_t monitors = std::max(needed, present);
+
+    // Both ways round: turning the phone must not take another restart.
+    std::vector<DisplayMode> modes{want, {want.height, want.width, want.hz}};
+    // Every restart interrupts everyone, so what the others are about to ask for goes in this one.
+    {
+        std::lock_guard<std::mutex> lock2(sessionMutex_);
+        for (auto& c : connections_) {
+            if (!c->session || c->session.get() == session || c->session->settings().mirror) continue;
+            const DisplayMode m = c->session->wantedMode();
+            modes.push_back(m);
+            modes.push_back({m.height, m.width, m.hz});
+        }
+    }
+    // A driver the user runs for themselves keeps the number of monitors they gave it.
+    bool changed = false;
+    const char* problem = nullptr;
+    std::string gpu;
+    if (ownsDriver_) {
+        // A GPU that has gone since it was chosen is no reason to lose the display.
+        const std::string chosen = store_.settings().vddGpu;
+        const auto all = listGpus();
+        const bool exists = std::any_of(all.begin(), all.end(), [&](const auto& g) { return narrow(g.name) == chosen; });
+        gpu = exists ? chosen : "default";
+    }
+    if (!ensureVddConfig(modes, keep, ownsDriver_ ? static_cast<int>(monitors) : 0, gpu, &changed)) problem = "virtual_display_config_denied";
+
+    const char* word = ownsDriver_ && !driverOn_ ? "enable" : changed ? "restart" : nullptr;
+    if (!word) return problem;
+    logf("%s the driver for %dx%d@%d and %zu monitors", word, want.width, want.height, want.hz, monitors);
+    // Restarting takes every capture out of the way first. It can still be put off for a moment,
+    // while a capture lets go, and for as long as another program holds on to the display.
+    const bool restarting = strcmp(word, "restart") == 0;
+    if (restarting) stopVirtualCaptures(session);
+    for (int attempt = 0;; ++attempt) {
+        const auto error = askDisplayService(word);
+        if (!error) break;
+        if (*error != ERROR_SUCCESS_RESTART_REQUIRED) {
+            logf("the display service could not %s the driver: %lu", word, *error);
+            return "display_service_failed";
+        }
+        if (attempt == 5) {
+            logf("something else keeps the virtual display in use; it cannot %s", word);
+            return "virtual_display_busy";
+        }
+        Sleep(500);
+    }
+    if (ownsDriver_) driverOn_ = true;
+    *changedDriver = true;
+    // Monitors arrive some seconds later.
+    const size_t expected = ownsDriver_ ? monitors : 1;
+    for (int i = 0; i < 150 && listVddMonitors().size() < expected; ++i) Sleep(100);
+    if (listVddMonitors().size() < expected) logf("the driver has %zu of %zu monitors", listVddMonitors().size(), expected);
+    Sleep(1000);  // Windows goes on rearranging for a moment after they appear
+    return problem;
+}
+
+std::wstring Host::claimDisplay(const Session* session, const ClientId& id) {
+    auto lock = lockDisplays();
+    const auto present = [](const std::wstring& m) {
+        const auto all = listVddMonitors();
+        return std::find(all.begin(), all.end(), m) != all.end();
+    };
+    for (const auto& c : claims_) {
+        if (c.session != session) continue;
+        // Absent means the driver is reloading, for this device or another.
+        for (int i = 0; i < 50 && !present(c.monitor); ++i) Sleep(100);
+        return present(c.monitor) ? c.monitor : std::wstring{};
+    }
+    const auto take = [&](DisplayClaim& c) {
+        c.session = session;
+        c.owner = id;
+        c.releaseAtUs = 0;
+        return c.monitor;
+    };
+    if (hasIdentity(id)) {
+        for (auto& c : claims_)
+            if (!c.session && c.owner == id) return take(c);
+    }
+    const auto taken = [&](const std::wstring& m) {
+        return std::any_of(claims_.begin(), claims_.end(), [&](const auto& c) { return c.monitor == m; });
+    };
+    auto monitors = listVddMonitors();
+    for (const auto& m : monitors) {
+        if (taken(m)) continue;
+        claims_.push_back({m});
+        return take(claims_.back());
+    }
+    // One whose device left moments ago is already on the desktop.
+    for (auto& c : claims_)
+        if (!c.session) return take(c);
+
+    logf("no free virtual monitor among %zu", monitors.size());
+    return {};
+}
+
+std::vector<std::wstring> Host::claimedDisplays() {
+    auto lock = lockDisplays();
+    std::vector<std::wstring> out;
+    for (const auto& c : claims_) out.push_back(c.monitor);
+    return out;
+}
+
+void Host::dropClaim(size_t index) {
+    const std::wstring monitor = claims_[index].monitor;
+    claims_.erase(claims_.begin() + index);
+    if (claims_.empty()) lastDisplayGone();
+    // A display the user had on the desktop before we came stays there.
+    else if (!(layoutSaved_ && layoutHasMonitor(savedLayout_, monitor))) removeVddMonitor(monitor);
+}
+
+void Host::releaseDisplay(const Session* session, bool now) {
+    auto lock = lockDisplays();
+    modesInUse_.erase(std::remove_if(modesInUse_.begin(), modesInUse_.end(), [&](const auto& u) { return u.first == session; }), modesInUse_.end());
+    for (size_t i = 0; i < claims_.size(); ++i) {
+        if (claims_[i].session != session) continue;
+        claims_[i].session = nullptr;
+        if (now) dropClaim(i);
+        else claims_[i].releaseAtUs = monotonicUs() + kDetachGraceUs;  // short drops must not reshuffle windows
+        return;
+    }
+    // Mirroring from the start, or the last device moved on to mirroring.
+    if (claims_.empty() && now) lastDisplayGone();
 }
 
 void Host::recoverLayoutAtStart() {
@@ -842,42 +1279,33 @@ void Host::recoverLayoutAtStart() {
             applyLayout(layout, ownsDriver_);
         }
         DeleteFileW(layoutFilePath().c_str());
-        return;
     }
-    // The driver's monitor appears at boot, and Windows may clone it onto the real
-    // display. With no phone connected it has no business being on the desktop.
-    if (ownsDriver_ && vddOnDesktop()) {
-        DisplayLayout layout;
-        if (queryLayoutWithoutVdd(layout) && !layout.paths.empty() && applyLayout(layout, true))
-            logf("virtual display taken off the desktop at start");
-    }
+    // Nothing is connected yet, and an earlier run may not have got as far as turning it off.
+    if (ownsDriver_) askDisplayService("disable");
 }
 
 void Host::detachIfIdle(bool force) {
-    {
-        std::lock_guard<std::mutex> lock(attachMutex_);
-        if (!layoutSaved_) return;
-        if (sessionActive_.load() && !force) {
-            detachAtUs_ = 0;
-            return;
-        }
-        uint64_t now = monotonicUs();
-        if (!force) {
-            if (detachAtUs_ == 0) {
-                detachAtUs_ = now + kDetachGraceUs;  // short drops must not reshuffle windows
-                return;
-            }
-            if (now < detachAtUs_) return;
-        }
+    // This runs in the accept loop. Display work can take seconds, and a device arriving
+    // meanwhile must not have to wait for that, so a busy lock just means next time.
+    std::unique_lock<std::recursive_mutex> lock(displayMutex_, std::defer_lock);
+    if (force) lock.lock();
+    else if (!lock.try_lock()) return;
+    if (force) {
+        claims_.clear();
+        lastDisplayGone();
+        return;
     }
-    restoreLayoutNow();
+    const uint64_t now = monotonicUs();
+    for (size_t i = claims_.size(); i-- > 0;) {
+        if (!claims_[i].session && now >= claims_[i].releaseAtUs) dropClaim(i);
+    }
 }
 
 bool Host::start() {
     netInit();
     store_.load();
     // Wireless can be toggled at runtime, so the check happens per connection.
-    ownsDriver_ = GetFileAttributesW(L"C:\\ProgramData\\SideDroid\\driver-installed-by-sidedroid") != INVALID_FILE_ATTRIBUTES;
+    ownsDriver_ = vddDriverIsOurs();
     recoverLayoutAtStart();
     running_ = true;
     acceptThread_ = std::thread(&Host::acceptLoop, this);
@@ -913,12 +1341,24 @@ void Host::stop() {
     if (updater_) updater_->stop();
     {
         std::lock_guard<std::mutex> lock(sessionMutex_);
-        if (session_) session_->requestStop();
+        for (auto& c : connections_)
+            if (c->session) c->session->requestStop();
     }
     // The accept loop wakes within half a second, and only then is the socket free to close.
     if (acceptThread_.joinable()) acceptThread_.join();
     listener_.close();
-    if (sessionThread_.joinable()) sessionThread_.join();
+    {
+        std::list<std::unique_ptr<Connection>> all;
+        {
+            std::lock_guard<std::mutex> lock(sessionMutex_);
+            // One may have finished its handshake in the meantime.
+            for (auto& c : connections_)
+                if (c->session) c->session->requestStop();
+            all.swap(connections_);
+        }
+        for (auto& c : all)
+            if (c->thread.joinable()) c->thread.join();
+    }
     if (ipc_) ipc_->stop();
     adb_.stop();
     discovery_.stop();
@@ -942,14 +1382,14 @@ bool Host::ensureListening() {
     if (listener_.valid()) {
         if (listenFailures_ > 0) {
             logf("listening on port %d", opts_.port);
-            publishStatus([](LiveStatus& l) { if (l.error == "port_in_use") l.error.clear(); });
+            setHostError("port_in_use", true);
         }
         listenFailures_ = 0;
         return true;
     }
     if (listenFailures_++ == 0) {
         logf("cannot listen on port %d", opts_.port);
-        publishStatus([](LiveStatus& l) { l.error = "port_in_use"; });
+        setHostError("port_in_use");
     }
     // Earlier versions let the adb server inherit the listening socket, which then
     // holds the port with no host behind it. Stopping the server releases it, and
@@ -977,75 +1417,163 @@ void Host::acceptLoop() {
             logf("refused %s: wireless is turned off", peer.c_str());
             continue;
         }
-        if (sessionActive_.load()) {
-            logf("refused %s: a phone is already connected", peer.c_str());
+        reapConnections();
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        if (connections_.size() >= kMaxConnections) {
+            logf("refused %s: too many connections", peer.c_str());
             continue;
         }
-        if (sessionThread_.joinable()) sessionThread_.join();
-
-        // A silent peer must not hold up the port.
-        s.setRecvTimeout(10000);
-        HostAuth auth;
-        auth.peerIsLoopback = loopback;
-        auth.currentPairingCode = [this] { return takePairingCodeAttempt(); };
-        auth.lookupPaired = [this](const ClientId& id) -> std::optional<Key32> {
-            auto d = store_.findPaired(id);
-            if (!d) return std::nullopt;
-            return d->secret;
-        };
-        auto hs = handshakeHost(s, auth);
-        if (!hs) {
-            logf("handshake failed from %s", peer.c_str());
-            continue;
-        }
-        s.setRecvTimeout(0);
-
-        auto session = std::make_shared<Session>(*this, std::move(s), *hs, loopback);
-        const bool newPair = hs->mode == AuthMode::Pairing;
-        if (newPair) {
-            std::lock_guard<std::mutex> lock(pairMutex_);
-            pairingCode_.clear();
-        }
-        {
-            std::lock_guard<std::mutex> lock(sessionMutex_);
-            session_ = session;
-        }
-        sessionActive_ = true;
-        const auto clientId = hs->clientId;
-        const auto secret = hs->keys.pairSecret;
-        sessionThread_ = std::thread([this, session, newPair, clientId, secret] {
-            if (newPair) {
-                PairedDevice d;
-                d.id = clientId;
-                d.secret = secret;
-                d.name = "Android";
-                store_.addPaired(d);
-            }
-            session->run();
-            if (newPair && !session->deviceName().empty()) {
-                PairedDevice d;
-                d.id = clientId;
-                d.secret = secret;
-                d.name = session->deviceName();
-                store_.addPaired(d);
-            }
-            {
-                std::lock_guard<std::mutex> lock(sessionMutex_);
-                session_.reset();
-            }
-            sessionActive_ = false;
-        });
+        connections_.push_back(std::make_unique<Connection>());
+        Connection* conn = connections_.back().get();
+        // On its own thread: a slow handshake must not keep the next device waiting.
+        conn->thread = std::thread(&Host::serveConnection, this, std::move(s), std::move(peer), loopback, conn);
     }
     // Stop wants the display gone at once.
 }
 
+void Host::reapConnections() {
+    std::list<std::unique_ptr<Connection>> finished;
+    {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        for (auto it = connections_.begin(); it != connections_.end();) {
+            if ((*it)->done) finished.splice(finished.end(), connections_, it++);
+            else ++it;
+        }
+    }
+    for (auto& c : finished)
+        if (c->thread.joinable()) c->thread.join();
+}
+
+bool Host::takePlace(Connection* conn, const ClientId& id) {
+    std::unique_lock<std::mutex> lock(sessionMutex_);
+    // The same device again: its old connection is usually one that died unnoticed.
+    if (hasIdentity(id)) {
+        const auto holders = [&] {
+            std::vector<Connection*> out;
+            for (auto& c : connections_)
+                if (c->holdsPlace && c->clientId == id) out.push_back(c.get());
+            return out;
+        };
+        const uint64_t deadline = monotonicUs() + 10'000'000;
+        for (auto old = holders(); !old.empty(); old = holders()) {
+            if (monotonicUs() > deadline) return false;
+            for (auto* c : old)
+                if (c->session) c->session->requestStop();
+            sessionCv_.wait_for(lock, std::chrono::milliseconds(100));
+        }
+    }
+    const auto holding = std::count_if(connections_.begin(), connections_.end(), [](const auto& c) { return c->holdsPlace; });
+    if (holding >= static_cast<std::ptrdiff_t>(kMaxDevices)) return false;
+    conn->holdsPlace = true;
+    conn->clientId = id;
+    return true;
+}
+
+void Host::serveConnection(Socket s, std::string peer, bool loopback, Connection* conn) {
+    const auto finish = [&] {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        conn->session.reset();
+        conn->holdsPlace = false;
+        conn->done = true;
+        sessionCv_.notify_all();
+    };
+
+    // A silent peer must not hold up its place for long.
+    s.setRecvTimeout(10000);
+    HostAuth auth;
+    auth.peerIsLoopback = loopback;
+    auth.currentPairingCode = [this] { return takePairingCodeAttempt(); };
+    auth.lookupPaired = [this](const ClientId& id) -> std::optional<Key32> {
+        auto d = store_.findPaired(id);
+        if (!d) return std::nullopt;
+        return d->secret;
+    };
+    auto hs = handshakeHost(s, auth);
+    if (!hs) {
+        logf("handshake failed from %s", peer.c_str());
+        finish();
+        return;
+    }
+
+    // Saved before anything can turn the device away: it has saved its half already.
+    const bool newPair = hs->mode == AuthMode::Pairing;
+    if (newPair) {
+        {
+            std::lock_guard<std::mutex> lock(pairMutex_);
+            pairingCode_.clear();
+        }
+        PairedDevice d;
+        d.id = hs->clientId;
+        d.secret = hs->keys.pairSecret;
+        d.name = "Android";
+        store_.addPaired(d);
+    }
+
+    if (!takePlace(conn, hs->clientId)) {
+        logf("refused %s: %zu devices are already connected", peer.c_str(), kMaxDevices);
+        Session(*this, std::move(s), *hs, loopback).refuseFull();
+        finish();
+        return;
+    }
+    s.setRecvTimeout(0);
+    auto session = std::make_shared<Session>(*this, std::move(s), *hs, loopback);
+    {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        conn->session = session;
+    }
+    if (running_) session->run();
+    if (newPair && !session->deviceName().empty()) {
+        PairedDevice d;
+        d.id = hs->clientId;
+        d.secret = hs->keys.pairSecret;
+        d.name = session->deviceName();
+        store_.addPaired(d);
+    }
+    finish();
+}
+
+static std::string settingsJson(uint16_t width, uint16_t height, uint16_t hz, uint32_t maxKbps, bool mirror, uint16_t scale, const std::string& encoder, uint8_t fill) {
+    std::ostringstream o;
+    o << "\"width\":" << width << ",\"height\":" << height << ",\"hz\":" << hz << ",\"maxKbps\":" << maxKbps
+      << ",\"mirror\":" << (mirror ? "true" : "false") << ",\"scale\":" << scale << ",\"encoder\":\"" << jsonEscape(encoder) << "\",\"fill\":" << static_cast<int>(fill);
+    return o.str();
+}
+
+static std::string optionsJson(const LiveStatus& l, const Size& pc) {
+    std::ostringstream o;
+    o << "{\"phoneW\":" << l.phoneW << ",\"phoneH\":" << l.phoneH << ",\"pcW\":" << pc.width << ",\"pcH\":" << pc.height
+      << ",\"recommendedScale\":" << l.recommendedScale << ",\"currentScale\":" << l.currentScale << ",\"rates\":[";
+    bool first = true;
+    for (auto r : l.phoneRates) {
+        if (!first) o << ',';
+        first = false;
+        o << r;
+    }
+    o << "],\"resolutions\":[";
+    first = true;
+    for (const auto& r : commonResolutions(l.maxDecodeLong, l.maxDecodeShort)) {
+        if (!first) o << ',';
+        first = false;
+        o << "{\"w\":" << r.width << ",\"h\":" << r.height << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
 std::string Host::statusJson() {
-    LiveStatus l;
+    std::string hostError;
     {
         std::lock_guard<std::mutex> lock(statusMutex_);
-        l = *live_;
+        hostError = hostError_;
+    }
+    std::vector<std::pair<LiveStatus, DeviceSettings>> devices;
+    {
+        std::lock_guard<std::mutex> lock(sessionMutex_);
+        for (auto& c : connections_)
+            if (c->session) devices.emplace_back(c->session->live(), c->session->settings());
     }
     auto settings = store_.settings();
+    const Size pc = primaryDisplaySize();
     std::string code;
     long long codeSeconds = 0;
     {
@@ -1059,20 +1587,39 @@ std::string Host::statusJson() {
 
     std::ostringstream o;
     o << "{\"ok\":true"
-      << ",\"connected\":" << (l.connected ? "true" : "false")
-      << ",\"device\":\"" << jsonEscape(l.device) << "\""
-      << ",\"transport\":\"" << l.transport << "\""
-      << ",\"error\":\"" << jsonEscape(l.error) << "\""
-      << ",\"encoder\":\"" << jsonEscape(l.encoder) << "\""
-      << ",\"codec\":\"" << l.codec << "\""
-      << ",\"displayW\":" << l.displayW << ",\"displayH\":" << l.displayH << ",\"hz\":" << l.hz
-      << ",\"encodeW\":" << l.encodeW << ",\"encodeH\":" << l.encodeH << ",\"fps\":" << l.fps
-      << ",\"kbps\":" << l.kbps << ",\"measuredKbps\":" << l.measuredKbps
-      << ",\"rttMs\":" << l.rttMs << ",\"decodeMs\":" << l.decodeMs
-      << ",\"encodeMs\":" << l.encodeMs << ",\"measuredFps\":" << l.measuredFps
-      << ",\"lossPercent\":" << l.lossPercent << ",\"framesDropped\":" << l.framesDropped
-      << ",\"mirror\":" << (settings.mirror ? "true" : "false")
-      << ",\"usingVirtualDisplay\":" << (l.usingVirtualDisplay ? "true" : "false")
+      << ",\"connected\":" << (devices.empty() ? "false" : "true")
+      << ",\"maxDevices\":" << kMaxDevices
+      << ",\"error\":\"" << jsonEscape(hostError) << "\""
+      << ",\"devices\":[";
+    {
+        bool firstDevice = true;
+        for (const auto& [l, d] : devices) {
+            if (!firstDevice) o << ',';
+            firstDevice = false;
+            o << "{\"id\":\"" << l.id << "\""
+              << ",\"name\":\"" << jsonEscape(l.device) << "\""
+              << ",\"transport\":\"" << l.transport << "\""
+              << ",\"error\":\"" << jsonEscape(l.error) << "\""
+              << ",\"encoder\":\"" << jsonEscape(l.encoder) << "\""
+              << ",\"codec\":\"" << l.codec << "\""
+              << ",\"source\":\"" << jsonEscape(l.sourceName) << "\""
+              << ",\"displayW\":" << l.displayW << ",\"displayH\":" << l.displayH << ",\"hz\":" << l.hz
+              << ",\"encodeW\":" << l.encodeW << ",\"encodeH\":" << l.encodeH << ",\"fps\":" << l.fps
+              << ",\"kbps\":" << l.kbps << ",\"measuredKbps\":" << l.measuredKbps
+              << ",\"rttMs\":" << l.rttMs << ",\"decodeMs\":" << l.decodeMs
+              << ",\"encodeMs\":" << l.encodeMs << ",\"measuredFps\":" << l.measuredFps
+              << ",\"lossPercent\":" << l.lossPercent << ",\"framesDropped\":" << l.framesDropped
+              << ",\"usingVirtualDisplay\":" << (l.usingVirtualDisplay ? "true" : "false")
+              << ",\"captureGpu\":\"" << jsonEscape(l.captureGpu) << "\",\"encoderGpu\":\"" << jsonEscape(l.encoderGpu) << "\""
+              << ",\"crossAdapter\":" << (l.crossAdapter ? "true" : "false")
+              << ",\"encoderFallback\":" << (l.encoderFallback ? "true" : "false")
+              << ",\"settings\":{" << settingsJson(d.width, d.height, d.hz, d.maxKbps, d.mirror, d.scalePercent, d.encoder, d.fill) << "}"
+              << ",\"options\":" << optionsJson(l, pc) << "}";
+        }
+    }
+    o << "]"
+      << ",\"consoleAutostart\":" << (consoleStartsWithWindows() ? "true" : "false")
+      << ",\"consoleAutostartAsked\":" << (settings.consoleAutostartAsked ? "true" : "false")
       << ",\"virtualDisplayInstalled\":" << (vddInstalled() ? "true" : "false")
       << ",\"adbFound\":" << (adb_.adbFound() ? "true" : "false")
       << ",\"pairingCode\":\"" << code << "\",\"pairingSeconds\":" << codeSeconds;
@@ -1081,29 +1628,28 @@ std::string Host::statusJson() {
         o << ",\"update\":{\"state\":\"" << u.state << "\",\"version\":\"" << u.version << "\",\"notes\":\"" << jsonEscape(u.notes)
           << "\",\"progress\":" << u.progress << "}";
     }
-    o << ",\"settings\":{\"width\":" << settings.width << ",\"height\":" << settings.height << ",\"hz\":" << settings.hz
-      << ",\"maxKbps\":" << settings.maxKbps << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false")
-      << ",\"mirror\":" << (settings.mirror ? "true" : "false") << ",\"scale\":" << settings.scalePercent << "}"
-      << ",\"options\":{";
     {
-        const Size pc = primaryDisplaySize();
-        o << "\"phoneW\":" << l.phoneW << ",\"phoneH\":" << l.phoneH << ",\"pcW\":" << pc.width << ",\"pcH\":" << pc.height
-          << ",\"recommendedScale\":" << l.recommendedScale << ",\"currentScale\":" << l.currentScale << ",\"rates\":[";
-        bool firstRate = true;
-        for (auto r : l.phoneRates) {
-            if (!firstRate) o << ',';
-            firstRate = false;
-            o << r;
+        o << ",\"vddGpu\":\"" << jsonEscape(settings.vddGpu) << "\",\"vddGpuEditable\":" << (vddDriverIsOurs() ? "true" : "false") << ",\"gpus\":[";
+        std::vector<std::string> names;
+        for (const auto& g : listGpus()) {
+            const std::string name = narrow(g.name);
+            if (std::find(names.begin(), names.end(), name) != names.end()) continue;
+            if (!names.empty()) o << ',';
+            names.push_back(name);
+            o << '"' << jsonEscape(name) << '"';
         }
-        o << "],\"resolutions\":[";
-        bool firstSize = true;
-        for (const auto& r : commonResolutions(l.maxDecodeLong, l.maxDecodeShort)) {
-            if (!firstSize) o << ',';
-            firstSize = false;
-            o << "{\"w\":" << r.width << ",\"h\":" << r.height << "}";
+        o << "],\"encoders\":[";
+        bool firstEncoder = true;
+        for (const auto& e : encoderChoices()) {
+            if (!firstEncoder) o << ',';
+            firstEncoder = false;
+            o << "{\"id\":\"" << jsonEscape(e.id) << "\",\"label\":\"" << jsonEscape(e.label) << "\"}";
         }
-        o << "]}";
+        o << "]";
     }
+    o << ",\"settings\":{" << settingsJson(settings.width, settings.height, settings.hz, settings.maxKbps, settings.mirror, settings.scalePercent, settings.encoder, settings.fill)
+      << ",\"allowWireless\":" << (settings.allowWireless ? "true" : "false") << "}"
+      << ",\"options\":" << optionsJson(LiveStatus{}, pc);
     o << ",\"usbDevices\":[";
     bool first = true;
     for (const auto& d : adb_.devices()) {
@@ -1122,25 +1668,98 @@ std::string Host::statusJson() {
     return o.str();
 }
 
+std::vector<LiveStatus> Host::liveStatuses() {
+    std::vector<LiveStatus> out;
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    for (auto& c : connections_)
+        if (c->session) out.push_back(c->session->live());
+    return out;
+}
+
 LiveStatus Host::liveStatus() {
+    auto all = liveStatuses();
+    if (!all.empty()) return all.front();
+    LiveStatus l;
     std::lock_guard<std::mutex> lock(statusMutex_);
-    return *live_;
+    l.error = hostError_;
+    return l;
+}
+
+std::vector<std::pair<LiveStatus, DeviceSettings>> Host::deviceViews() {
+    std::vector<std::pair<LiveStatus, DeviceSettings>> out;
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    for (auto& c : connections_)
+        if (c->session) out.emplace_back(c->session->live(), c->session->settings());
+    return out;
+}
+
+void Host::chooseForDevice(const std::string& id, const Settings& s) {
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    for (auto& c : connections_)
+        if (c->session && c->session->id() == id)
+            c->session->chooseDisplay(s.width, s.height, s.hz, s.maxKbps, s.mirror, s.scalePercent, s.encoder, s.fill);
+}
+
+void Host::setAllowWireless(bool allow) {
+    Settings s = store_.settings();
+    if (s.allowWireless == allow) return;
+    s.allowWireless = allow;
+    store_.setSettings(s);
+    if (opts_.enableDiscovery) {
+        if (allow) discovery_.start(opts_.port);
+        else discovery_.stop();
+    }
+}
+
+bool Host::setVddGpu(const std::string& name) {
+    const auto all = listGpus();
+    if (!name.empty() && std::none_of(all.begin(), all.end(), [&](const auto& g) { return narrow(g.name) == name; })) return false;
+    Settings s = store_.settings();
+    if (s.vddGpu == name) return true;
+    s.vddGpu = name;
+    store_.setSettings(s);
+    // The next round of each pipeline applies it, by way of prepareDriver.
+    std::lock_guard<std::mutex> lock(sessionMutex_);
+    for (auto& c : connections_)
+        if (c->session) c->session->displaysChanged();
+    return true;
 }
 
 void Host::applySettings(const Settings& s) {
-    const bool wasWireless = store_.settings().allowWireless;
+    setAllowWireless(s.allowWireless);
     store_.setSettings(s);
-    if (s.allowWireless != wasWireless && opts_.enableDiscovery) {
-        if (s.allowWireless) discovery_.start(opts_.port);
-        else discovery_.stop();
-    }
+    store_.clearCustomDeviceSettings();
     std::lock_guard<std::mutex> lock(sessionMutex_);
-    if (session_) session_->settingsChanged();
+    for (auto& c : connections_)
+        if (c->session) c->session->followDefaults(s);
 }
 
-void Host::disconnectPhone() {
+void Host::disconnectPhone(const std::string& id) {
     std::lock_guard<std::mutex> lock(sessionMutex_);
-    if (session_) session_->requestStop();
+    for (auto& c : connections_)
+        if (c->session && (id.empty() || c->session->id() == id)) c->session->requestStop();
+}
+
+static constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static constexpr wchar_t kConsoleRunValue[] = L"SideDroidConsole";
+
+bool Host::consoleStartsWithWindows() {
+    return RegGetValueW(HKEY_CURRENT_USER, kRunKey, kConsoleRunValue, RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+}
+
+void Host::setConsoleStartsWithWindows(bool on) {
+    if (!on) {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kConsoleRunValue);
+        return;
+    }
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring dir(self);
+    dir.erase(dir.find_last_of(L'\\'));
+    const std::wstring command = L"\"" + dir + L"\\console\\SideDroid.exe\"";
+    const LSTATUS r = RegSetKeyValueW(HKEY_CURRENT_USER, kRunKey, kConsoleRunValue, REG_SZ, command.c_str(),
+                                      static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    if (r != ERROR_SUCCESS) logf("cannot set the console to start with Windows: %ld", r);
 }
 
 std::string Host::startPairing() {
@@ -1155,7 +1774,28 @@ std::string Host::handleCommand(const std::string& json) {
     const std::string cmd = jsonGetString(json, "cmd");
     if (cmd == "status") return statusJson();
     if (cmd == "set") {
+        // With an id, for that device. Without, new defaults for all of them.
+        const std::string id = jsonGetString(json, "id");
+        if (!id.empty()) {
+            setAllowWireless(jsonGetBool(json, "allowWireless", store_.settings().allowWireless));
+            std::lock_guard<std::mutex> lock(sessionMutex_);
+            for (auto& c : connections_) {
+                if (!c->session || c->session->id() != id) continue;
+                const DeviceSettings d = c->session->settings();
+                c->session->chooseDisplay(static_cast<uint16_t>(jsonGetNumber(json, "width", d.width)),
+                                          static_cast<uint16_t>(jsonGetNumber(json, "height", d.height)),
+                                          static_cast<uint16_t>(jsonGetNumber(json, "hz", d.hz)),
+                                          static_cast<uint32_t>(jsonGetNumber(json, "maxKbps", d.maxKbps)),
+                                          jsonGetBool(json, "mirror", d.mirror),
+                                          static_cast<uint16_t>(jsonGetNumber(json, "scale", d.scalePercent)),
+                                          json.find("\"encoder\"") != std::string::npos ? jsonGetString(json, "encoder") : d.encoder,
+                                          static_cast<uint8_t>(jsonGetNumber(json, "fill", d.fill)));
+                return R"({"ok":true})";
+            }
+            return R"({"ok":false,"error":"no such device"})";
+        }
         Settings s = store_.settings();
+        const Settings before = s;
         s.width = static_cast<uint16_t>(jsonGetNumber(json, "width", s.width));
         s.height = static_cast<uint16_t>(jsonGetNumber(json, "height", s.height));
         s.hz = static_cast<uint16_t>(jsonGetNumber(json, "hz", s.hz));
@@ -1163,7 +1803,16 @@ std::string Host::handleCommand(const std::string& json) {
         s.allowWireless = jsonGetBool(json, "allowWireless", s.allowWireless);
         s.mirror = jsonGetBool(json, "mirror", s.mirror);
         s.scalePercent = static_cast<uint16_t>(jsonGetNumber(json, "scale", s.scalePercent));
-        applySettings(s);
+        s.fill = static_cast<uint8_t>(jsonGetNumber(json, "fill", s.fill));
+        if (s.fill > kFillTile) s.fill = kFillFit;
+        if (json.find("\"encoder\"") != std::string::npos) s.encoder = jsonGetString(json, "encoder");
+        // Turning wireless on or off is no reason to forget what each device has chosen.
+        if (s.width == before.width && s.height == before.height && s.hz == before.hz && s.maxKbps == before.maxKbps &&
+            s.mirror == before.mirror && s.scalePercent == before.scalePercent && s.encoder == before.encoder && s.fill == before.fill) {
+            setAllowWireless(s.allowWireless);
+        } else {
+            applySettings(s);
+        }
         return R"({"ok":true})";
     }
     if (cmd == "pair_start") {
@@ -1197,7 +1846,17 @@ std::string Host::handleCommand(const std::string& json) {
         return std::string(R"({"ok":)") + (removed ? "true" : "false") + "}";
     }
     if (cmd == "disconnect") {
-        disconnectPhone();
+        disconnectPhone(jsonGetString(json, "id"));
+        return R"({"ok":true})";
+    }
+    if (cmd == "set_gpu") {
+        return std::string(R"({"ok":)") + (setVddGpu(jsonGetString(json, "gpu")) ? "true" : "false") + "}";
+    }
+    if (cmd == "console_autostart") {
+        setConsoleStartsWithWindows(jsonGetBool(json, "enabled", false));
+        Settings s = store_.settings();
+        s.consoleAutostartAsked = true;
+        store_.setSettings(s);
         return R"({"ok":true})";
     }
     if (cmd == "update_install") {

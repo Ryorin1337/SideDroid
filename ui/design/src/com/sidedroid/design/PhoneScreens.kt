@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,9 +23,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalIconButton
-import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -224,66 +220,3 @@ fun PairingDialog(hostName: String, wrongCode: Boolean, onSubmit: (String) -> Un
 
 data class StreamInfo(val resolution: String, val fps: Int, val bitrate: String, val transport: String, val rttMs: Int)
 
-/**
- * Hidden edge handle plus a floating toolbar: the only chrome over the desktop.
- * Settings open beside the content on a wide window and above the toolbar on a narrow one.
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun StreamOverlay(
-    info: StreamInfo?,
-    toolbarOpen: Boolean,
-    settingsOpen: Boolean,
-    onToggleToolbar: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onDisconnect: () -> Unit,
-    modifier: Modifier = Modifier,
-    settings: @Composable () -> Unit,
-) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        if (!toolbarOpen) return@BoxWithConstraints
-        val windowWidth = maxWidth
-        val windowHeight = maxHeight
-        val wide = windowWidth >= 720.dp
-        val toolbarSpace = 96.dp
-
-        @Composable
-        fun panel(panelModifier: Modifier) {
-            Surface(panelModifier, shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Box(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) { settings() }
-            }
-        }
-
-        if (settingsOpen && wide) {
-            panel(
-                // Clear of the toolbar, which a short window would otherwise put on top of it.
-                Modifier.align(Alignment.CenterEnd).padding(end = 20.dp, top = 16.dp, bottom = toolbarSpace)
-                    .width(420.dp).heightIn(max = windowHeight - 16.dp - toolbarSpace),
-            )
-        }
-        Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp, start = 16.dp, end = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (settingsOpen && !wide) {
-                panel(Modifier.widthIn(max = 560.dp).heightIn(max = windowHeight - toolbarSpace - 16.dp))
-            }
-            HorizontalFloatingToolbar(expanded = true) {
-                FilledTonalIconButton(onClick = onOpenSettings) { Icon(SdIcons.Tune, "\u663E\u793A\u8BBE\u7F6E") }
-                if (info != null) {
-                    // The full line only where it fits: a narrow phone keeps the essentials.
-                    val text = if (windowWidth >= 560.dp) "${info.resolution} \u00B7 ${info.fps}Hz \u00B7 ${info.bitrate} \u00B7 ${info.rttMs}ms"
-                    else "${info.fps}Hz \u00B7 ${info.rttMs}ms"
-                    Text(
-                        text,
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 12.dp),
-                        maxLines = 1,
-                    )
-                }
-                FilledTonalButton(onClick = onDisconnect) { Text("\u65AD\u5F00") }
-            }
-        }
-    }
-}

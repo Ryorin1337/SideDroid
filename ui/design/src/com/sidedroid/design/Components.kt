@@ -137,7 +137,7 @@ fun <T> ChoiceRow(label: String, choices: List<Choice<T>>, selected: T, onSelect
                         else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
                     },
                 ) {
-                    Text(c.label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+                    Text(c.label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelLarge)
                 }
             }
         }

@@ -4,6 +4,7 @@ package com.sidedroid.console
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -26,7 +27,9 @@ import com.sidedroid.design.PhoneHomeScreen
 import com.sidedroid.design.PhoneHomeState
 import com.sidedroid.design.SideDroidTheme
 import com.sidedroid.design.StreamInfo
-import com.sidedroid.design.StreamOverlay
+import com.sidedroid.design.DockPlacement
+import com.sidedroid.design.DockSide
+import com.sidedroid.design.StreamDock
 import com.sidedroid.design.UpdateStage
 import com.sidedroid.design.UpdateUi
 import java.io.File
@@ -44,7 +47,18 @@ private fun render(out: File, name: String, w: Int, h: Int, dark: Boolean, conte
             t += 100_000_000L
         }
         val data = scene.render(t).encodeToData(EncodedImageFormat.PNG) ?: error("encode failed")
-        File(out, "$name-${if (dark) "dark" else "light"}.png").writeBytes(data.bytes)
+        val target = File(out, "$name-${if (dark) "dark" else "light"}.png")
+        val bytes = data.bytes
+        for (attempt in 1..20) {
+            try {
+                target.writeBytes(bytes)
+                break
+            } catch (e: java.io.IOException) {
+                // Something else can hold a screenshot for a moment, such as a virus scanner.
+                if (attempt == 20) throw e
+                Thread.sleep(250)
+            }
+        }
     }
 }
 
@@ -57,9 +71,14 @@ private val sampleOptions = DisplayOptionsUi(
     currentScale = 225,
 )
 
+private val pixel = ConnectedDevice(
+    id = "a", name = "Pixel 9 Pro", transport = "usb", encoder = "NVENC", codec = "HEVC",
+    displayW = 2992, displayH = 1344, encodeW = 2992, encodeH = 1344, kbps = 42000, rttMs = 3, measuredFps = 118.0,
+    settings = HostSettings(hz = 0), options = sampleOptions,
+)
+
 private val connected = HostStatus(
-    reachable = true, connected = true, device = "Pixel 9 Pro", transport = "usb", encoder = "NVENC", codec = "HEVC",
-    displayW = 2992, displayH = 1344, hz = 120, encodeW = 2992, encodeH = 1344, fps = 120, kbps = 42000, rttMs = 3, measuredFps = 118.0,
+    reachable = true, devices = listOf(pixel),
     settings = HostSettings(hz = 0), usbCount = 1, options = sampleOptions,
     paired = listOf(PairedDevice("a", "Pixel 9 Pro"), PairedDevice("b", "Galaxy Tab S9")),
 )
@@ -79,7 +98,52 @@ fun main(args: Array<String>) {
     for (dark in listOf(false, true)) {
         render(out, "console-waiting", 460, 860, dark) { Console(HostStatus(reachable = true, usbCount = 1, paired = connected.paired)) }
         render(out, "console-connected", 460, 860, dark) { Console(connected) }
-        render(out, "console-limited", 460, 860, dark) { Console(connected.copy(transport = "wifi", encodeW = 2094, encodeH = 940, kbps = 4800, rttMs = 18)) }
+        render(out, "console-limited", 460, 860, dark) { Console(connected.copy(devices = listOf(pixel.copy(transport = "wifi", encodeW = 2094, encodeH = 940, kbps = 4800, rttMs = 18)))) }
+        // Each side, resting and pulled out, high and low, on a phone, a phone on its side and a tablet.
+        val desktop = Color(0xFF2F4858)
+        val dockInfo = StreamInfo("3168\u00D71440", 120, "42 Mbps", "USB", 3)
+        @Composable
+        fun dock(side: DockSide, fraction: Float, open: Boolean, openRow: String? = null) {
+            Box(Modifier.fillMaxSize().background(desktop)) {
+                StreamDock(dockInfo, DockPlacement(side, fraction), {}, {}, initiallyOpen = open) {
+                    DisplaySettings(sampleOptions, DisplayValue(), onChange = {}, openRow = openRow)
+                }
+            }
+        }
+        for ((name, w, h) in listOf(Triple("phone", 400, 860), Triple("phone-land", 860, 400), Triple("tablet", 1280, 800))) {
+            for (side in DockSide.values()) {
+                val s = side.name.lowercase()
+                render(out, "dock-$name-$s-rest", w, h, dark) { dock(side, 0.5f, false) }
+                render(out, "dock-$name-$s-open-high", w, h, dark) { dock(side, 0f, true) }
+                render(out, "dock-$name-$s-open-low", w, h, dark) { dock(side, 1f, true) }
+                render(out, "dock-$name-$s-menu", w, h, dark) { dock(side, 0f, true, "resolution") }
+            }
+        }
+        render(out, "console-fill", 460, 860, dark) {
+            SectionCard { DisplaySettings(sampleOptions, DisplayValue(fill = 3), onChange = {}, showQuality = true, openRow = "fill") }
+        }
+        render(out, "console-gpu", 460, 860, dark) {
+            // Far enough down that a screen shows it only if the rest is short, so it goes first here.
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+                ConsoleScreen(
+                    HostStatus(
+                        reachable = true,
+                        devices = listOf(pixel.copy(crossAdapter = true, settings = HostSettings(mirror = true, encoder = "mf|Intel(R) UHD Graphics"), options = sampleOptions)),
+                        gpus = listOf("NVIDIA GeForce RTX 4070 Laptop GPU", "Intel(R) UHD Graphics"),
+                        encoders = listOf(
+                            EncoderOption("nvenc|NVIDIA GeForce RTX 4070 Laptop GPU", "NVENC · NVIDIA GeForce RTX 4070 Laptop GPU"),
+                            EncoderOption("mf|Intel(R) UHD Graphics", "MF · Intel(R) UHD Graphics"),
+                        ),
+                        vddGpu = "Intel(R) UHD Graphics",
+                    ),
+                    ConsoleActions(),
+                )
+            }
+        }
+        render(out, "console-ask-autostart", 460, 860, dark) { Console(connected.copy(consoleAutostartAsked = false)) }
+        render(out, "console-two-devices", 460, 860, dark) {
+            Console(connected.copy(devices = listOf(pixel, pixel.copy(id = "b", name = "Galaxy Tab S9", transport = "wifi", settings = HostSettings(mirror = true)))))
+        }
         render(out, "console-no-driver", 460, 860, dark) { Console(HostStatus(reachable = true, virtualDisplayInstalled = false)) }
         render(out, "console-pairing", 460, 860, dark) { Console(HostStatus(reachable = true, pairingCode = "K7QM-2XPD", pairingSeconds = 94)) }
 
@@ -98,9 +162,10 @@ fun main(args: Array<String>) {
             render(out, "stream-$name", size.first, size.second, dark) {
                 Box(Modifier.fillMaxSize()) {
                     Surface(Modifier.fillMaxSize(), color = Color(0xFF303846)) {}
-                    StreamOverlay(
+                    StreamDock(
                         StreamInfo("3168\u00D71440", 120, "42 Mbps", "USB", 3),
-                        toolbarOpen = true, settingsOpen = true, {}, {}, {},
+                        DockPlacement(), {}, {},
+                        initiallyOpen = true,
                     ) {
                         DisplaySettings(sampleOptions, DisplayValue(), onChange = {})
                     }

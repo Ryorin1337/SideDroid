@@ -3,7 +3,13 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <thread>
 
 #include "log.h"
 
@@ -43,6 +49,10 @@ ComPtr<ID3D11Device> createDeviceOnAdapter(LUID luid, ComPtr<ID3D11DeviceContext
         HRESULT hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                                        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2,
                                        D3D11_SDK_VERSION, &dev, nullptr, ctx ? ctx->ReleaseAndGetAddressOf() : nullptr);
+        // WARP and the Basic Display Adapter have no video device, and capture does not need one.
+        if (FAILED(hr))
+            hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2,
+                                   D3D11_SDK_VERSION, &dev, nullptr, ctx ? ctx->ReleaseAndGetAddressOf() : nullptr);
         if (FAILED(hr)) {
             logf("D3D11CreateDevice failed: 0x%08lx", static_cast<unsigned long>(hr));
             return nullptr;
@@ -92,11 +102,154 @@ std::vector<std::pair<LUID, UINT>> listHardwareAdapters() {
     return out;
 }
 
+// One duplication of an output, handed on through a texture on the GPU that each
+// reader copies from on its own device.
+class CaptureHub {
+public:
+    static std::shared_ptr<CaptureHub> get(const std::wstring& deviceName) {
+        static std::mutex registryMutex;
+        static std::map<std::wstring, std::weak_ptr<CaptureHub>> registry;
+        std::lock_guard<std::mutex> lock(registryMutex);
+        if (auto existing = registry[deviceName].lock())
+            if (!existing->lost()) return existing;
+        auto hub = std::make_shared<CaptureHub>();
+        if (!hub->start(deviceName)) return nullptr;
+        registry[deviceName] = hub;
+        return hub;
+    }
+
+    ~CaptureHub() {
+        stop_ = true;
+        if (thread_.joinable()) thread_.join();
+    }
+
+    bool start(const std::wstring& deviceName) {
+        if (!source_.open(deviceName)) return false;
+        D3D11_TEXTURE2D_DESC td;
+        source_.texture()->GetDesc(&td);
+        td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        if (FAILED(source_.device()->CreateTexture2D(&td, nullptr, &shared_))) return false;
+        ComPtr<IDXGIResource> resource;
+        if (FAILED(shared_.As(&resource)) || FAILED(resource->GetSharedHandle(&handle_))) return false;
+        if (FAILED(shared_.As(&mutex_))) return false;
+        thread_ = std::thread(&CaptureHub::loop, this);
+        return true;
+    }
+
+    bool lost() {
+        std::lock_guard<std::mutex> lock(mutex2_);
+        return lost_;
+    }
+    HANDLE handle() const { return handle_; }
+    int width() const { return source_.width(); }
+    int height() const { return source_.height(); }
+    LUID adapterLuid() const { return source_.adapterLuid(); }
+
+    // Waits for a picture newer than `seen`.
+    CaptureResult wait(uint64_t* seen, int timeoutMs) {
+        std::unique_lock<std::mutex> lock(mutex2_);
+        cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return lost_ || seq_ != *seen; });
+        if (lost_) return CaptureResult::Lost;
+        if (seq_ == *seen) return CaptureResult::Timeout;
+        *seen = seq_;
+        return CaptureResult::NewFrame;
+    }
+
+private:
+    void loop() {
+        while (!stop_) {
+            const CaptureResult r = source_.acquire(50);
+            if (r == CaptureResult::Lost) {
+                std::lock_guard<std::mutex> lock(mutex2_);
+                lost_ = true;
+                cv_.notify_all();
+                return;
+            }
+            if (r != CaptureResult::NewFrame || mutex_->AcquireSync(0, 100) != S_OK) continue;
+            source_.context()->CopyResource(shared_.Get(), source_.texture());
+            mutex_->ReleaseSync(0);
+            std::lock_guard<std::mutex> lock(mutex2_);
+            ++seq_;
+            cv_.notify_all();
+        }
+    }
+
+    DesktopCapture source_;
+    ComPtr<ID3D11Texture2D> shared_;
+    ComPtr<IDXGIKeyedMutex> mutex_;
+    HANDLE handle_ = nullptr;  // not an owning handle: it lives as long as the texture
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+    std::mutex mutex2_;
+    std::condition_variable cv_;
+    uint64_t seq_ = 0;
+    bool lost_ = false;
+};
+
+std::vector<GpuInfo> listGpus() {
+    std::vector<GpuInfo> out;
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return out;
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; factory->EnumAdapters1(i, adapter.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 d;
+        adapter->GetDesc1(&d);
+        out.push_back({d.Description, d.VendorId, d.AdapterLuid});
+    }
+    return out;
+}
+
+std::vector<EncoderChoice> encoderChoices() {
+    std::vector<EncoderChoice> out;
+    std::vector<std::wstring> seen;
+    for (const auto& g : listGpus()) {
+        if (std::find(seen.begin(), seen.end(), g.name) != seen.end()) continue;
+        seen.push_back(g.name);
+        if (g.vendor == kVendorMicrosoft) continue;  // no hardware to encode with
+        const std::string name = narrow(g.name);
+        if (g.vendor == kVendorNvidia) out.push_back({"nvenc|" + name, "NVENC · " + name});
+        if (g.vendor == kVendorAmd) out.push_back({"amf|" + name, "AMF · " + name});
+        if (g.vendor == kVendorIntel) out.push_back({"qsv|" + name, "Quick Sync · " + name});
+        out.push_back({"mf|" + name, "MF · " + name});  // short: the button has room for little
+    }
+    out.push_back({"sw|", "软件 · CPU"});
+    return out;
+}
+
 DesktopCapture::~DesktopCapture() {
     if (frameHeld_ && dup_) dup_->ReleaseFrame();
 }
 
-bool DesktopCapture::open(const std::wstring& deviceName) {
+bool DesktopCapture::openShared(const std::wstring& deviceName) {
+    hub_ = CaptureHub::get(deviceName);
+    if (!hub_) return false;
+    luid_ = hub_->adapterLuid();
+    width_ = hub_->width();
+    height_ = hub_->height();
+    device_ = createDeviceOnAdapter(luid_, &ctx_);
+    if (!device_) return false;
+    if (FAILED(device_->OpenSharedResource(hub_->handle(), IID_PPV_ARGS(&hubTexture_)))) {
+        logf("cannot open the shared capture texture");
+        return false;
+    }
+    if (FAILED(hubTexture_.As(&hubMutex_))) return false;
+    D3D11_TEXTURE2D_DESC td;
+    hubTexture_->GetDesc(&td);
+    td.MiscFlags = 0;
+    return SUCCEEDED(device_->CreateTexture2D(&td, nullptr, &composed_));
+}
+
+CaptureResult DesktopCapture::acquireShared(int timeoutMs) {
+    const CaptureResult r = hub_->wait(&hubSeen_, timeoutMs);
+    if (r != CaptureResult::NewFrame) return r;
+    if (hubMutex_->AcquireSync(0, 100) != S_OK) return CaptureResult::Timeout;
+    ctx_->CopyResource(composed_.Get(), hubTexture_.Get());
+    hubMutex_->ReleaseSync(0);
+    return CaptureResult::NewFrame;
+}
+
+bool DesktopCapture::open(const std::wstring& deviceName, bool shared) {
+    if (shared) return openShared(deviceName);
     UINT vendor = 0;
     std::wstring adapterDesc;
     if (!findAdapterOfOutput(deviceName, &luid_, &adapterDesc, &vendor)) {
@@ -288,6 +441,7 @@ void DesktopCapture::drawCursor() {
 }
 
 CaptureResult DesktopCapture::acquire(int timeoutMs) {
+    if (hub_) return acquireShared(timeoutMs);
     if (frameHeld_) {
         dup_->ReleaseFrame();
         frameHeld_ = false;
@@ -381,6 +535,56 @@ bool Nv12Converter::convert(ID3D11Texture2D* bgra) {
     stream.Enable = TRUE;
     stream.pInputSurface = inView_.Get();
     return SUCCEEDED(vctx_->VideoProcessorBlt(proc_.Get(), outView_.Get(), 0, 1, &stream));
+}
+
+bool CpuNv12Converter::init(ID3D11Device* dev, ID3D11DeviceContext* ctx, int srcW, int srcH, int dstW, int dstH) {
+    ctx_ = ctx;
+    srcW_ = srcW;
+    srcH_ = srcH;
+    dstW_ = dstW;
+    dstH_ = dstH;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = srcW;
+    td.Height = srcH;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &staging_))) return false;
+    mapX_.resize(dstW);
+    mapY_.resize(dstH);
+    for (int x = 0; x < dstW; ++x) mapX_[x] = x * srcW / dstW;
+    for (int y = 0; y < dstH; ++y) mapY_[y] = y * srcH / dstH;
+    out_.resize(static_cast<size_t>(dstW) * dstH * 3 / 2);
+    return true;
+}
+
+bool CpuNv12Converter::convert(ID3D11Texture2D* bgra) {
+    ctx_->CopyResource(staging_.Get(), bgra);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
+    const auto* src = static_cast<const uint8_t*>(m.pData);
+    uint8_t* plane = out_.data();
+    uint8_t* chroma = plane + static_cast<size_t>(dstW_) * dstH_;
+    for (int y = 0; y < dstH_; ++y) {
+        const uint8_t* row = src + static_cast<size_t>(mapY_[y]) * m.RowPitch;
+        uint8_t* yOut = plane + static_cast<size_t>(y) * dstW_;
+        // Chroma from the even rows and columns: one sample for each two by two pixels.
+        uint8_t* uvOut = (y & 1) ? nullptr : chroma + static_cast<size_t>(y / 2) * dstW_;
+        for (int x = 0; x < dstW_; ++x) {
+            const uint8_t* p = row + static_cast<size_t>(mapX_[x]) * 4;
+            const int b = p[0], g = p[1], r = p[2];
+            yOut[x] = static_cast<uint8_t>(((47 * r + 157 * g + 16 * b + 128) >> 8) + 16);
+            if (uvOut && !(x & 1)) {
+                uvOut[x] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
+                uvOut[x + 1] = static_cast<uint8_t>(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
+            }
+        }
+    }
+    ctx_->Unmap(staging_.Get(), 0);
+    return true;
 }
 
 bool CrossAdapterCopy::init(ID3D11Device* srcDev, ID3D11DeviceContext* srcCtx, ID3D11Device* dstDev,

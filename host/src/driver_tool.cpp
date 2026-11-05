@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "vdd_device.h"
+
 #pragma comment(lib, "cfgmgr32.lib")
 
 namespace {
@@ -38,16 +40,6 @@ bool hasHardwareId(HDEVINFO set, SP_DEVINFO_DATA& dev) {
     for (const wchar_t* p = buf; *p; p += wcslen(p) + 1)
         if (_wcsicmp(p, kHardwareId) == 0) return true;
     return false;
-}
-
-bool deviceExists() {
-    HDEVINFO set = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
-    if (set == INVALID_HANDLE_VALUE) return false;
-    SP_DEVINFO_DATA dev{sizeof(dev)};
-    bool found = false;
-    for (DWORD i = 0; !found && SetupDiEnumDeviceInfo(set, i, &dev); ++i) found = hasHardwareId(set, dev);
-    SetupDiDestroyDeviceInfoList(set);
-    return found;
 }
 
 // The host edits this file to add a phone's modes, without running elevated.
@@ -96,7 +88,7 @@ int install(const std::wstring& packageDir) {
     }
     if (!prepareConfig(packageDir)) return 3;
 
-    if (deviceExists()) {
+    if (sd::vddDeviceExists()) {
         // Already installed by the user, or by an earlier run: keep it, keep ownership as is.
         printf("driver already present\n");
         return 0;
@@ -139,6 +131,9 @@ int install(const std::wstring& packageDir) {
     CreateDirectoryW(kMarkerDir, nullptr);
     HANDLE h = CreateFileW(kMarker, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    // Off until a device connects: the service turns it on for that.
+    const DWORD off = sd::changeVddDevice(sd::VddDeviceAction::Disable);
+    if (off != ERROR_SUCCESS) fprintf(stderr, "could not turn the new device off: %lu\n", off);
     printf("driver installed%s\n", reboot ? " (restart required)" : "");
     return 0;
 }
@@ -190,7 +185,7 @@ int uninstall() {
 int wmain(int argc, wchar_t** argv) {
     std::wstring cmd = argc > 1 ? argv[1] : L"";
     if (cmd == L"status") {
-        printf("device=%s installed_by_sidedroid=%s\n", deviceExists() ? "present" : "absent",
+        printf("device=%s installed_by_sidedroid=%s\n", sd::vddDeviceExists() ? "present" : "absent",
                GetFileAttributesW(kMarker) != INVALID_FILE_ATTRIBUTES ? "yes" : "no");
         return 0;
     }

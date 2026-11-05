@@ -57,6 +57,7 @@ Bytes encode(const Config& m) {
     w.u16(m.manualHeight);
     w.u16(m.manualHz);
     w.u16(m.manualScale);
+    w.u8(m.fill);
     return b;
 }
 
@@ -74,6 +75,9 @@ std::optional<Config> decodeConfig(Reader r) {
     m.manualHeight = r.u16();
     m.manualHz = r.u16();
     m.manualScale = r.u16();
+    // Hosts before this option do not send it.
+    if (r.remaining() > 0) m.fill = r.u8();
+    if (m.fill > kFillTile) m.fill = kFillFit;
     if (!r.ok()) return std::nullopt;
     return m;
 }
@@ -170,6 +174,7 @@ Bytes encode(const SetDisplay& m) {
     w.u32(m.maxBitrateKbps);
     w.u8(m.mirror);
     w.u16(m.scale);
+    w.u8(m.fill);
     return b;
 }
 
@@ -181,6 +186,9 @@ std::optional<SetDisplay> decodeSetDisplay(Reader r) {
     m.maxBitrateKbps = r.u32();
     m.mirror = r.u8();
     m.scale = r.u16();
+    // Clients before this option do not send it, nor do they have an opinion.
+    if (r.remaining() > 0) m.fill = r.u8();
+    if (m.fill > kFillTile && m.fill != kFillKeep) m.fill = kFillKeep;
     if (!r.ok() || m.mirror > kMirrorKeep) return std::nullopt;
     return m;
 }

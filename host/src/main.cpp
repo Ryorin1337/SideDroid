@@ -4,15 +4,18 @@
 #include <objbase.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include "capture.h"
 #include "display.h"
 #include "host.h"
 #include "log.h"
 #include "resource.h"
+#include "vdd_device.h"
 
 using namespace sd;
 
@@ -30,6 +33,11 @@ enum MenuId : UINT {
     ID_SCALE_BASE = 80,    // up to 20 steps
     ID_HZ_BASE = 100,      // up to 20 rates
     ID_QUALITY_BASE = 120,
+    ID_DISCONNECT_ALL = 130,
+    ID_DEVICE_BASE = 140,   // up to 10 devices
+    ID_GPU_BASE = 150,      // automatic, then up to 19 GPUs
+    ID_ENCODER_BASE = 170,  // automatic, then up to 39 encoders
+    ID_FILL_BASE = 210,     // in the order of kFillFit and so on
 };
 
 struct QualityChoice { const wchar_t* label; uint32_t kbps; };
@@ -38,6 +46,7 @@ const QualityChoice kQualities[] = {{L"自适应", 0}, {L"省流", 10000}, {L"�
 Host* g_host = nullptr;
 NOTIFYICONDATAW g_nid{};
 UINT g_taskbarCreated = 0;
+std::string g_menuDeviceId;  // the device whose settings the menu shows and changes
 
 std::wstring exeDir() {
     wchar_t self[MAX_PATH];
@@ -72,6 +81,9 @@ std::wstring errorLine(const std::string& code) {
     if (code == "virtual_display_config_denied") return L"无法写入虚拟显示配置";
     if (code == "virtual_display_layout") return L"无法把虚拟屏设为独立显示器";
     if (code == "no_encoder") return L"没有可用的硬件编码器";
+    if (code == "virtual_display_count") return L"无法增加虚拟显示器";
+    if (code == "virtual_display_busy") return L"虚拟屏正被其他程序占用，无法增加显示器";
+    if (code == "display_service_failed") return L"显示服务出错，请重新安装 SideDroid";
     if (code == "port_in_use") return L"端口 27183 被其他程序占用，正在重试";
     return widen(code);
 }
@@ -79,19 +91,23 @@ std::wstring errorLine(const std::string& code) {
 // The lines at the top of the menu, also used for the tooltip.
 std::vector<std::wstring> statusLines() {
     std::vector<std::wstring> out;
-    const LiveStatus l = g_host->liveStatus();
-    if (!l.connected) {
+    const auto devices = g_host->liveStatuses();
+    if (devices.empty()) {
+        const LiveStatus l = g_host->liveStatus();
         out.push_back(l.error.empty() ? L"未连接手机" : errorLine(l.error));
         return out;
     }
-    out.push_back(format(L"已连接：%s · %s", widen(l.device).c_str(), l.transport == "wifi" ? L"Wi-Fi" : L"USB"));
-    if (!l.error.empty()) {
-        out.push_back(errorLine(l.error));
-        return out;
-    }
-    if (l.displayW > 0) {
-        out.push_back(format(L"%s · %d×%d · %d%% · %.0f fps", l.usingVirtualDisplay ? L"副屏" : L"镜像", l.displayW, l.displayH, l.usingVirtualDisplay ? l.currentScale : 100, l.measuredFps));
-        out.push_back(format(L"%.1f Mbps · 延迟 %u ms · %s %s", l.kbps / 1000.0, l.rttMs, widen(l.encoder).c_str(), widen(l.codec).c_str()));
+    for (const auto& l : devices) {
+        out.push_back(format(L"已连接：%s · %s", widen(l.device).c_str(), l.transport == "wifi" ? L"Wi-Fi" : L"USB"));
+        if (!l.error.empty()) {
+            out.push_back(errorLine(l.error));
+            continue;
+        }
+        if (l.displayW > 0) {
+            out.push_back(format(L"%s · %d×%d · %d%% · %.0f fps", l.usingVirtualDisplay ? L"副屏" : L"镜像", l.displayW, l.displayH, l.usingVirtualDisplay ? l.currentScale : 100, l.measuredFps));
+            // With several devices the menu has no room for every number.
+            if (devices.size() == 1) out.push_back(format(L"%.1f Mbps · 延迟 %u ms · %s %s", l.kbps / 1000.0, l.rttMs, widen(l.encoder).c_str(), widen(l.codec).c_str()));
+        }
     }
     return out;
 }
@@ -125,8 +141,30 @@ void addRadio(HMENU menu, UINT id, const wchar_t* label, bool checked, bool enab
 }
 
 void showMenu(HWND hwnd) {
-    const Settings s = g_host->currentSettings();
-    const LiveStatus l = g_host->liveStatus();
+    // The display settings shown are those of one device, picked in the menu. Whoever was picked
+    // may have left, and the oldest then takes over. With none connected, they are the defaults.
+    const auto devices = g_host->deviceViews();
+    const size_t deviceCount = devices.size();
+    const std::pair<LiveStatus, DeviceSettings>* current = nullptr;
+    for (const auto& d : devices)
+        if (d.first.id == g_menuDeviceId) current = &d;
+    if (!current && !devices.empty()) current = &devices.front();
+    g_menuDeviceId = current ? current->first.id : std::string{};
+
+    Settings s = g_host->currentSettings();
+    const std::string chosenGpu = s.vddGpu;
+    if (current) {
+        const DeviceSettings& d = current->second;
+        s.width = d.width;
+        s.height = d.height;
+        s.hz = d.hz;
+        s.maxKbps = d.maxKbps;
+        s.mirror = d.mirror;
+        s.scalePercent = d.scalePercent;
+        s.encoder = d.encoder;
+        s.fill = d.fill;
+    }
+    const LiveStatus l = current ? current->first : g_host->liveStatus();
     HMENU menu = CreatePopupMenu();
 
     for (const auto& line : statusLines()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, line.c_str());
@@ -135,6 +173,13 @@ void showMenu(HWND hwnd) {
         AppendMenuW(menu, MF_STRING, ID_INSTALL_DRIVER, L"安装驱动…");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    if (deviceCount > 1) {
+        HMENU deviceMenu = CreatePopupMenu();
+        for (UINT i = 0; i < deviceCount && i < 10; ++i)
+            addRadio(deviceMenu, ID_DEVICE_BASE + i, widen(devices[i].first.device).c_str(), &devices[i] == current);
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(deviceMenu), format(L"调整设备：%s", widen(current->first.device).c_str()).c_str());
+    }
 
     HMENU modeMenu = CreatePopupMenu();
     addRadio(modeMenu, ID_MODE_EXTEND, L"副屏（扩展桌面）", !s.mirror);
@@ -171,14 +216,44 @@ void showMenu(HWND hwnd) {
         addRadio(hzMenu, ID_HZ_BASE + 1 + i, format(L"%d Hz", rates[i]).c_str(), s.hz == rates[i]);
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(hzMenu), L"刷新率");
 
+    HMENU fillMenu = CreatePopupMenu();
+    addRadio(fillMenu, ID_FILL_BASE, L"适应（留黑边）", s.fill == 0);
+    addRadio(fillMenu, ID_FILL_BASE + 1, L"填充（裁掉边缘）", s.fill == 1);
+    addRadio(fillMenu, ID_FILL_BASE + 2, L"拉伸（会变形）", s.fill == 2);
+    addRadio(fillMenu, ID_FILL_BASE + 3, L"平铺（原始大小，重复）", s.fill == 3);
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fillMenu), L"画面适配");
+
     HMENU qualityMenu = CreatePopupMenu();
     for (UINT i = 0; i < _countof(kQualities); ++i) addRadio(qualityMenu, ID_QUALITY_BASE + i, kQualities[i].label, s.maxKbps == kQualities[i].kbps);
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(qualityMenu), L"画质");
 
+    const std::vector<EncoderChoice> encoders = encoderChoices();
+    HMENU encoderMenu = CreatePopupMenu();
+    addRadio(encoderMenu, ID_ENCODER_BASE, L"自动（推荐）", s.encoder.empty());
+    for (UINT i = 0; i < encoders.size() && i < 39; ++i)
+        addRadio(encoderMenu, ID_ENCODER_BASE + 1 + i, widen(encoders[i].label).c_str(), s.encoder == encoders[i].id);
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(encoderMenu), L"编码器");
+
+    // For every virtual display, whichever device is picked above.
+    std::vector<std::string> gpus;
+    for (const auto& g : listGpus()) {
+        const std::string name = narrow(g.name);
+        if (std::find(gpus.begin(), gpus.end(), name) == gpus.end()) gpus.push_back(name);
+    }
+    HMENU gpuMenu = CreatePopupMenu();
+    addRadio(gpuMenu, ID_GPU_BASE, L"自动（推荐）", chosenGpu.empty());
+    for (UINT i = 0; i < gpus.size() && i < 19; ++i) {
+        const bool software = gpus[i].rfind("Microsoft", 0) == 0;
+        addRadio(gpuMenu, ID_GPU_BASE + 1 + i, software ? L"微软软件渲染（很慢）" : widen(gpus[i]).c_str(), chosenGpu == gpus[i]);
+    }
+    AppendMenuW(menu, MF_POPUP | (vddDriverIsOurs() ? 0 : MF_GRAYED), reinterpret_cast<UINT_PTR>(gpuMenu), L"虚拟屏显卡（所有副屏）");
+
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     addRadio(menu, ID_WIRELESS, L"允许无线连接", s.allowWireless);
     AppendMenuW(menu, MF_STRING | (s.allowWireless ? 0 : MF_GRAYED), ID_PAIR, L"添加设备…");
-    AppendMenuW(menu, MF_STRING | (l.connected ? 0 : MF_GRAYED), ID_DISCONNECT, L"断开连接");
+    AppendMenuW(menu, MF_STRING | (l.connected ? 0 : MF_GRAYED), ID_DISCONNECT,
+                deviceCount > 1 ? format(L"断开 %s", widen(current->first.device).c_str()).c_str() : L"断开连接");
+    if (deviceCount > 1) AppendMenuW(menu, MF_STRING, ID_DISCONNECT_ALL, L"断开全部");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     const UpdateStatus update = g_host->updateStatus();
@@ -199,12 +274,30 @@ void showMenu(HWND hwnd) {
     DestroyMenu(menu);  // also destroys the submenus
 
     Settings next = s;
+    const auto apply = [&] {
+        if (current) g_host->chooseForDevice(current->first.id, next);
+        else g_host->applySettings(next);
+    };
     if (cmd == ID_OPEN) {
         openConsole();
     } else if (cmd == ID_EXIT) {
         PostQuitMessage(0);
     } else if (cmd == ID_DISCONNECT) {
+        if (current) g_host->disconnectPhone(current->first.id);
+    } else if (cmd == ID_DISCONNECT_ALL) {
         g_host->disconnectPhone();
+    } else if (cmd >= ID_DEVICE_BASE && cmd < ID_DEVICE_BASE + deviceCount) {
+        g_menuDeviceId = devices[cmd - ID_DEVICE_BASE].first.id;
+    } else if (cmd == ID_GPU_BASE) {
+        g_host->setVddGpu("");
+    } else if (cmd > ID_GPU_BASE && cmd <= ID_GPU_BASE + gpus.size()) {
+        g_host->setVddGpu(gpus[cmd - ID_GPU_BASE - 1]);
+    } else if (cmd == ID_ENCODER_BASE) {
+        next.encoder.clear();
+        apply();
+    } else if (cmd > ID_ENCODER_BASE && cmd <= ID_ENCODER_BASE + encoders.size()) {
+        next.encoder = encoders[cmd - ID_ENCODER_BASE - 1].id;
+        apply();
     } else if (cmd == ID_INSTALL_DRIVER) {
         g_host->handleCommand(R"({"cmd":"install_driver"})");
     } else if (cmd == ID_INSTALL_UPDATE) {
@@ -214,31 +307,33 @@ void showMenu(HWND hwnd) {
         g_host->startPairing();
         openConsole();
     } else if (cmd == ID_WIRELESS) {
-        next.allowWireless = !s.allowWireless;
-        g_host->applySettings(next);
+        g_host->setAllowWireless(!s.allowWireless);
     } else if (cmd == ID_MODE_EXTEND || cmd == ID_MODE_MIRROR) {
         next.mirror = cmd == ID_MODE_MIRROR;
-        g_host->applySettings(next);
+        apply();
     } else if (cmd == ID_RES_PHONE || cmd == ID_RES_PC) {
         next.width = next.height = cmd == ID_RES_PC ? kResolutionMatchPc : 0;
-        g_host->applySettings(next);
+        apply();
     } else if (cmd >= ID_RES_BASE && cmd < ID_RES_BASE + sizes.size()) {
         next.width = sizes[cmd - ID_RES_BASE].width;
         next.height = sizes[cmd - ID_RES_BASE].height;
-        g_host->applySettings(next);
+        apply();
     } else if (cmd >= ID_SCALE_BASE && cmd < ID_SCALE_BASE + steps.size()) {
         const uint16_t chosen = steps[cmd - ID_SCALE_BASE];
         next.scalePercent = chosen == l.recommendedScale ? 0 : chosen;
-        g_host->applySettings(next);
+        apply();
     } else if (cmd == ID_HZ_BASE) {
         next.hz = 0;
-        g_host->applySettings(next);
+        apply();
     } else if (cmd > ID_HZ_BASE && cmd <= ID_HZ_BASE + rates.size()) {
         next.hz = rates[cmd - ID_HZ_BASE - 1];
-        g_host->applySettings(next);
+        apply();
+    } else if (cmd >= ID_FILL_BASE && cmd < ID_FILL_BASE + 4) {
+        next.fill = static_cast<uint8_t>(cmd - ID_FILL_BASE);
+        apply();
     } else if (cmd >= ID_QUALITY_BASE && cmd < ID_QUALITY_BASE + _countof(kQualities)) {
         next.maxKbps = kQualities[cmd - ID_QUALITY_BASE].kbps;
-        g_host->applySettings(next);
+        apply();
     }
     updateTooltip();
 }
@@ -331,6 +426,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (a == L"--test-pattern") opts.testPattern = true;
         else if (a == L"--test-virtual-display") opts.useVirtualDisplayInTest = true;
         else if (a == L"--list-outputs") listOnly = true;
+        else if (a == L"--test-break-encoder" && i + 1 < argc) opts.testBreakEncoder = narrow(argv[++i]);
+        else if (a == L"--test-deaf-encoder" && i + 1 < argc) opts.testDeafEncoder = narrow(argv[++i]);
         else if (a == L"--update-test-base" && i + 1 < argc) opts.updateTestBase = argv[++i];
     }
     // Never on the real port: it would point a real installation at another source.

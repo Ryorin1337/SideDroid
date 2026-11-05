@@ -49,6 +49,7 @@ data class DisplayValue(
     val hz: Int = 0,
     val scale: Int = 0,
     val maxKbps: Int = 0,
+    val fill: Int = FILL_FIT,
 )
 
 private fun sizeText(s: Pair<Int, Int>) = "${s.first}×${s.second}"
@@ -196,6 +197,17 @@ fun DisplaySettings(
             value.hz,
             { onChange(value.copy(hz = it)) },
             enabled = enabled,
+        )
+        SettingDropdownRow(
+            SdIcons.FitScreen,
+            "画面适配",
+            "画面和屏幕比例不同时",
+            FillChoices,
+            value.fill,
+            { onChange(value.copy(fill = it)) },
+            enabled = enabled,
+            initiallyOpen = openRow == "fill",
+            buttonLabel = FillChoices.firstOrNull { it.value == value.fill }?.label?.substringBefore('（'),
         )
         if (showQuality) {
             SettingDropdownRow(

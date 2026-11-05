@@ -151,7 +151,10 @@ void Client::tcpLoop() {
             break;
         }
         case MsgType::Bye:
-            disconnect("host closed");
+        {
+            const uint8_t why = body.u8();
+            disconnect(body.ok() && why == kByeHostFull ? "host full" : "host closed");
+        }
             return;
         default:
             break;
@@ -194,6 +197,7 @@ void Client::udpLoop() {
                 else tokens -= n;
             }
         }
+        if (n > 0 && opts_.debugSharedLink && !opts_.debugSharedLink(n)) n = 0;
         if (n > static_cast<int>(kUdpOverhead)) {
             uint64_t seq;
             if (udpOpen(keys_.udpH2C, buf.data(), static_cast<size_t>(n), plain.data(), &seq) &&

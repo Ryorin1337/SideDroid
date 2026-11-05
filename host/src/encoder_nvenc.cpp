@@ -20,6 +20,8 @@ class NvencEncoder final : public Encoder {
 public:
     ~NvencEncoder() override { shutdown(); }
 
+    const char* kind() const override { return "nvenc"; }
+
     bool init(const EncoderConfig& cfg) {
         cfg_ = cfg;
         dll_ = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);

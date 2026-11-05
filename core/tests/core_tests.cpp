@@ -22,6 +22,26 @@ static int g_failures = 0;
         }                                                                \
     } while (0)
 
+static void testFillOnTheWire() {
+    Config c;
+    c.displayWidth = 1920;
+    c.fill = kFillTile;
+    Bytes b = encode(c);
+    auto dc = decodeConfig(Reader(b.data() + 1, b.size() - 1));
+    CHECK(dc && dc->fill == kFillTile);
+    // From a host without the option: everything else is still there.
+    auto old = decodeConfig(Reader(b.data() + 1, b.size() - 2));
+    CHECK(old && old->fill == kFillFit && old->displayWidth == 1920);
+
+    SetDisplay s;
+    s.fill = kFillStretch;
+    b = encode(s);
+    auto ds = decodeSetDisplay(Reader(b.data() + 1, b.size() - 1));
+    CHECK(ds && ds->fill == kFillStretch);
+    auto olds = decodeSetDisplay(Reader(b.data() + 1, b.size() - 2));
+    CHECK(olds && olds->fill == kFillKeep);
+}
+
 static void testWire() {
     Hello h;
     h.deviceName = "Pixel";
@@ -282,6 +302,23 @@ static void testRatecontrol() {
         CHECK(idle.target().bitrateKbps == b0);
     }
 
+    // Silence, as during a rebuild, must not undo what the rate had settled at.
+    {
+        RateController quiet(l);
+        Stats busy{};
+        busy.windowMs = 100;
+        busy.bytes = 1000000;
+        busy.packetsReceived = 100;
+        busy.framesDropped = 1;
+        for (int i = 0; i < 40; ++i) quiet.update(busy, 0);
+        const uint32_t settled = quiet.target().bitrateKbps;
+        CHECK(settled < l.startKbps);
+        Stats none{};
+        none.windowMs = 100;
+        for (int i = 0; i < 200; ++i) quiet.update(none, 0);
+        CHECK(quiet.target().bitrateKbps == settled);
+    }
+
     // Sender backlog alone counts as congestion on TCP, where loss is invisible.
     RateLimits t = l;
     t.udp = false;
@@ -409,7 +446,7 @@ int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     netInit();
     const struct { const char* name; void (*fn)(); } tests[] = {
-        {"wire", testWire}, {"reed-solomon", testReedSolomon}, {"assembler", testAssembler},
+        {"wire", testWire}, {"fill", testFillOnTheWire}, {"reed-solomon", testReedSolomon}, {"assembler", testAssembler},
         {"ratecontrol", testRatecontrol}, {"secure", testSecure}, {"handshake", testHandshake},
         {"channel", testChannel}};
     for (const auto& t : tests) {

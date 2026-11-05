@@ -280,8 +280,8 @@ JNIEXPORT jstring JNICALL Java_com_sidedroid_app_NativeBridge_start(
         auto s = weak.lock();
         if (!s) return;
         s->decoder.configure(c);
-        call(s->listener, "onConfig", "(IIIIIIIZIIII)V", c.displayWidth, c.displayHeight, c.encodeWidth, c.encodeHeight,
-             c.fps, c.codec, static_cast<jint>(c.bitrateKbps), c.mirror ? JNI_TRUE : JNI_FALSE, c.manualWidth, c.manualHeight, c.manualHz, c.manualScale);
+        call(s->listener, "onConfig", "(IIIIIIIZIIIII)V", c.displayWidth, c.displayHeight, c.encodeWidth, c.encodeHeight,
+             c.fps, c.codec, static_cast<jint>(c.bitrateKbps), c.mirror ? JNI_TRUE : JNI_FALSE, c.manualWidth, c.manualHeight, c.manualHz, c.manualScale, static_cast<jint>(c.fill));
     };
     cb.onDisplayOptions = [weak](const DisplayOptions& o) {
         auto s = weak.lock();
@@ -379,11 +379,12 @@ JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendViewport(JNIEnv*,
     if (auto s = current()) s->client->sendViewport(static_cast<uint16_t>(w), static_cast<uint16_t>(h));
 }
 
-JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendSetDisplay(JNIEnv*, jobject, jint w, jint h, jint hz, jboolean mirror, jint scale) {
+JNIEXPORT void JNICALL Java_com_sidedroid_app_NativeBridge_sendSetDisplay(JNIEnv*, jobject, jint w, jint h, jint hz, jboolean mirror, jint scale, jint fill) {
     // The phone has no quality control of its own, so that setting stays as it is.
     if (auto s = current())
         s->client->sendSetDisplay(SetDisplay{static_cast<uint16_t>(w), static_cast<uint16_t>(h), static_cast<uint16_t>(hz),
-                                             kKeepBitrate, mirror ? kMirrorOn : kMirrorOff, static_cast<uint16_t>(scale)});
+                                             kKeepBitrate, mirror ? kMirrorOn : kMirrorOff, static_cast<uint16_t>(scale),
+                                             static_cast<uint8_t>(fill)});
 }
 
 JNIEXPORT jint JNICALL Java_com_sidedroid_app_NativeBridge_rttUs(JNIEnv*, jobject) {

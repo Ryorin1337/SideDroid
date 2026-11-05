@@ -14,7 +14,7 @@ import androidx.compose.ui.unit.dp
 
 object AppInfo {
     // scripts/verify_artifacts.ps1 checks this against the packaged version.
-    const val VERSION = "0.0.2"
+    const val VERSION = "0.1.0"
     const val AUTHOR = "Ryorin"
     const val REPOSITORY_URL = "https://github.com/Ryorin1337/SideDroid"
     const val REPOSITORY_LABEL = "github.com/Ryorin1337/SideDroid"

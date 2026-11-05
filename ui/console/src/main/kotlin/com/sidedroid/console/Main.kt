@@ -143,14 +143,16 @@ private fun runConsole(args: Array<String>, instance: String?, single: SingleIns
                     ConsoleScreen(
                         status,
                         ConsoleActions(
-                            onSetDisplay = { s -> act { client.setDisplay(s.width, s.height, s.hz, s.maxKbps, s.allowWireless, s.mirror, s.scale) } },
-                            onDisconnect = { act { client.disconnect() } },
+                            onSetDisplay = { id, s -> act { client.setDisplay(id, s.width, s.height, s.hz, s.maxKbps, s.allowWireless, s.mirror, s.scale, s.encoder, s.fill) } },
+                            onSetVddGpu = { gpu -> act { client.setVddGpu(gpu) } },
+                            onDisconnect = { id -> act { client.disconnect(id) } },
                             onInstallDriver = { act { client.installDriver() } },
                             onStartPairing = { act { client.startPairing() } },
                             onCancelPairing = { act { client.cancelPairing() } },
                             onUnpair = { id -> act { client.unpair(id) } },
                             onStartService = { act { client.startHost() } },
                             onInstallUpdate = { act { client.installUpdate() } },
+                            onSetConsoleAutostart = { on -> act { client.setConsoleAutostart(on) } },
                         ),
                         serviceStopped = serviceStopped,
                         // A host takes well under a second to start. This long means it will not.

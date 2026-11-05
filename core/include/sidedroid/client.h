@@ -24,6 +24,8 @@ struct ClientOptions {
     // Test tool only: simulate a bad network on the receiving end.
     int debugDropPercent = 0;
     uint32_t debugLimitKbps = 0;
+    // Testing only: decides whether a packet of this size gets through, as a link several clients share would.
+    std::function<bool(int)> debugSharedLink;
 };
 
 class Client {

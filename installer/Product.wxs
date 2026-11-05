@@ -16,8 +16,20 @@
     </StandardDirectory>
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-      <Files Include="$(var.Dist)\**" />
+      <Files Include="$(var.Dist)\**">
+        <Exclude Files="$(var.Dist)\sidedroid-service.exe" />
+      </Files>
     </ComponentGroup>
+
+    <!-- Turns the virtual display device on and off for the host, which runs as the user.
+         Stopped and removed along with everything else. -->
+    <Component Id="DisplayService" Directory="INSTALLFOLDER" Guid="5D1E7A34-8C2F-4E96-B1A7-3F6C9D0E2B48">
+      <File Id="ServiceExe" Source="$(var.Dist)\sidedroid-service.exe" KeyPath="yes" />
+      <ServiceInstall Id="DisplayServiceInstall" Name="SideDroidService" DisplayName="SideDroid Display Service"
+                      Description="Turns SideDroid's virtual display on while a device is connected and off afterwards."
+                      Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem" Vital="yes" />
+      <ServiceControl Id="DisplayServiceControl" Name="SideDroidService" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+    </Component>
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="3E8A1B6C-2D47-4F90-A5C1-7B9E0D2F4A61">
@@ -36,6 +48,7 @@
       <ComponentGroupRef Id="AppFiles" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="AutoStart" />
+      <ComponentRef Id="DisplayService" />
     </Feature>
 
     <!-- Lets phones reach the host. Scoped to this one program, not to a port. -->
@@ -52,10 +65,23 @@
                  Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM sidedroid-host.exe" />
     <CustomAction Id="StopHost" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
 
+    <!-- The host starts an adb server that outlives it, from the folder being removed. -->
+    <SetProperty Id="StopAdb" Sequence="execute" Before="StopAdb"
+                 Value="&quot;[INSTALLFOLDER]adb\adb.exe&quot; kill-server" />
+    <CustomAction Id="StopAdb" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore" />
+
     <!-- The console runs as the user: this has to happen before files are in use, and as the user. -->
     <SetProperty Id="WixQuietExecCmdLine" Sequence="execute" Before="StopConsole"
                  Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM SideDroid.exe" />
     <CustomAction Id="StopConsole" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+
+    <!-- The console's own start with Windows is a choice the user made, stored for that user.
+         Only the one uninstalling can be reached from here. For anyone else it stays as an
+         entry pointing at nothing, which Windows ignores. -->
+    <SetProperty Action="SetRemoveConsoleRun" Id="WixQuietExecCmdLine" Sequence="execute" Before="RemoveConsoleRun"
+                 Value="&quot;[System64Folder]reg.exe&quot; delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SideDroidConsole /f"
+                 Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RemoveConsoleRun" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
 
     <!-- Removes the driver only if SideDroid is the one that installed it. -->
     <SetProperty Id="DriverRemove" Sequence="execute" Before="DriverRemove"
@@ -67,9 +93,12 @@
 
     <InstallExecuteSequence>
       <Custom Action="StopConsole" Before="InstallValidate" />
+      <Custom Action="RemoveConsoleRun" After="InstallValidate" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="StopHost" Before="RemoveFiles" Condition="Installed" />
-      <Custom Action="DriverRemove" After="StopHost" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom Action="FirewallRemove" After="DriverRemove" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="StopAdb" After="StopHost" Condition="Installed" />
+      <Custom Action="DriverRemove" After="StopAdb" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Also before adding one, or every upgrade would leave another rule behind. -->
+      <Custom Action="FirewallRemove" After="DriverRemove" Condition="NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="FirewallAdd" After="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="LaunchConsole" After="InstallFinalize" Condition="NOT Installed AND UILevel &gt;= 3" />
     </InstallExecuteSequence>

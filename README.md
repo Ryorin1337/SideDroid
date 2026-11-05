@@ -16,13 +16,17 @@
 
 ## 功能
 
-- **真正的副屏：** 手机是一块独立的扩展显示器，也可以随时切换成镜像。断开后，电脑的分辨率和显示布局自动恢复。
+- **真正的副屏：** 手机是一块独立的扩展显示器，也可以随时切换成镜像。虚拟屏只在连接时存在，断开后消失，电脑的分辨率和显示布局自动恢复。
+- **多台设备：** 最多同时连接 4 台，每台各是一块屏，分辨率、缩放、刷新率、画质、画面适配和编码器分开设置，控制台和托盘菜单都可以选择要调整的设备。
+- **显卡和编码器：** 可以选择虚拟屏跑在哪张显卡上，以及用哪个编码器：NVENC、AMD AMF、Intel Quick Sync、Media Foundation，没有可用显卡时用 CPU 软件编码。详见 [docs/encoders.md](docs/encoders.md)。
 - **USB 和 Wi-Fi：** USB 插上就能用；Wi-Fi 自动发现电脑，配对一次后不用再输配对码，传输全程加密。
 - **分辨率和缩放：** 可以跟随手机、跟随电脑或选常用分辨率，缩放默认选好推荐值。
+- **画面适配：** 画面和屏幕比例不同时，可以选适应、填充、拉伸或平铺，在手机、控制台和托盘里都能改。
 - **刷新率：** 跟随手机屏幕，最高可到它支持的刷新率。
 - **多点触控：** 在手机上直接操作 Windows。
 - **自适应码率：** 网络变差时先降码率，再降帧率和清晰度，恢复后自动回升。
-- **硬件编解码：** 支持 NVENC 和 Media Foundation（Intel、AMD），HEVC 和 H.264。
+- **视频编码：** 自动选择可用的编码器，优先用硬件编码，支持 HEVC 和 H.264，某个编码器工作不正常时自动换下一个。
+- **串流时的设置：** 把手吸附在屏幕左右两侧，平时半透明，点开后可以调整设置或断开。
 - **自动检查更新：** 有新版本时提示，确认后下载、校验并调用系统安装程序。
 - **Material 3 Expressive：** 电脑和手机用同一套设计，支持深色模式，手机界面适配平板和折叠屏。
 
@@ -35,7 +39,7 @@
   </tr>
   <tr>
     <td align="center"><img src="docs/images/settings.png" width="200" alt="分辨率列表"><br>分辨率列表</td>
-    <td align="center"><img src="docs/images/stream.png" width="420" alt="串流时的设置"><br>串流时的设置</td>
+    <td align="center"><img src="docs/images/stream.png" width="200" alt="串流时的设置"><br>串流时的设置</td>
   </tr>
 </table>
 
@@ -44,7 +48,7 @@
 ## 安装
 
 **需要：**
-- Windows 10 或更高版本（x64），带硬件视频编码的显卡
+- Windows 10 或更高版本（x64）。建议有支持硬件视频编码的显卡，没有时用 CPU 软件编码，帧率和画质会明显下降
 - Android 8 或更高版本。Android 11 起有官方低延迟解码接口，更老的设备延迟可能更高
 
 **步骤：**
@@ -62,6 +66,8 @@
 
 MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应用商店安装的，Android 也可能提示。
 
+MSI 会安装系统服务 `SideDroidService`，它只负责在连接和断开时启用、禁用虚拟显示驱动，卸载时会一起移除。没有这个服务，虚拟屏无法使用。第一次打开控制台时，它还会询问要不要开机启动。
+
 ## 连接
 
 **USB：** 打开手机的 USB 调试并连上电脑，在手机应用里点“USB 连接”。
@@ -72,10 +78,10 @@ MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应�
 
 ## 当前状态
 
-这是早期版本（0.0.2），目前只在一台 NVIDIA 显卡的笔记本上测试过。以下情况还没有充分验证：
+这是早期版本（0.1.0）。主要在一台 NVIDIA 显卡的笔记本上开发和测试，AMD AMF 只在一位用户的 Radeon Vega 8 上跑通过。以下情况还没有充分验证：
 
-- Intel、AMD 显卡的编码路径
-- 真实 Wi-Fi 环境下的长时间使用
+- AMD 显卡上的丢包、限速和 H.264，以及其他型号的 AMD 显卡
+- 真实 Wi-Fi 环境下的长时间使用，以及多台设备共用 Wi-Fi
 - Android 8 到 10 的设备，以及平板真机
 
 遇到问题欢迎提 [Issue](https://github.com/Ryorin1337/SideDroid/issues)，并附上 `%LOCALAPPDATA%\SideDroid\host.log` 和 `adb logcat -s SideDroid` 的输出。
@@ -83,6 +89,9 @@ MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应�
 **已知限制：**
 - 触控无法操作管理员权限的窗口和 UAC 界面。
 - 镜像模式只能显示主屏。
+- 改成驱动还没有的分辨率时要重启驱动，所有已连接设备的画面都会中断几秒。
+- 有一台 AMD 显卡、可能是 Windows 10 的电脑，第一次连接时等了十几到几十秒屏幕才出现，原因还在确认。
+- 禁用驱动时偶尔会崩溃一次，Windows 会自动恢复，下次连接正常。
 - 界面目前只有中文。
 
 ## 从源码构建
@@ -108,7 +117,7 @@ MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应�
 
 ## 发布新版本
 
-1. 改版本号：`CMakeLists.txt`、`android/app/build.gradle.kts`（`versionCode` 也要加一）、`ui/console/build.gradle.kts`、`ui/design/.../About.kt` 和 `package.ps1` 的默认值。
+1. 改版本号：`CMakeLists.txt`、`android/app/build.gradle.kts`（`versionCode` 也要加一）、`ui/console/build.gradle.kts`、`ui/design/.../About.kt`、`package.ps1` 的默认值和本文的“当前状态”。
 2. 运行 `.\scripts\package.ps1 -Notes "更新说明"`。
 3. 提交、打标签 `v<版本号>`，把 `out\` 里的 MSI、APK 和 `SHA256SUMS.txt` 发布到 Release。
 4. **Release 公开后**，把 `out\update.json` 复制到仓库根目录，提交并推送。用户的客户端读到它就会提示更新，所以顺序不能反，否则用户会下载失败。

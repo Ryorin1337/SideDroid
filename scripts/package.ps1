@@ -5,7 +5,7 @@
 #   update.json                       goes in the repository once the release is public
 # Windows parts build here; the APKs build inside WSL, where the Android SDK lives.
 param(
-    [string]$Version = '0.0.2',
+    [string]$Version = '0.1.0',
     # What the update prompt says. Separate lines with `n.
     [string]$Notes = '',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
@@ -43,7 +43,7 @@ Require-Success 'cmake configure'
 Require-Success 'cmake build'
 & ctest --test-dir "$root\build" -C Release --output-on-failure
 Require-Success 'host and core tests'
-Copy-Item "$root\build\host\Release\sidedroid-host.exe", "$root\build\host\Release\sidedroid-driver-tool.exe" $dist
+Copy-Item "$root\build\host\Release\sidedroid-host.exe", "$root\build\host\Release\sidedroid-driver-tool.exe", "$root\build\host\Release\sidedroid-service.exe" $dist
 
 Write-Host '== Virtual Display Driver (unmodified)'
 $zip = "$root\third_party\vdd\VirtualDisplayDriver-25.7.23-x64.zip"
@@ -67,11 +67,19 @@ $adbZip = Join-Path $tools 'platform-tools.zip'
 if (-not (Test-Path $adbZip)) {
     Invoke-WebRequest 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' -OutFile $adbZip -UseBasicParsing
 }
-$adbTemp = Join-Path $out 'adb-extract'
-if (Test-Path $adbTemp) { Remove-Item $adbTemp -Recurse -Force }
-Expand-Archive $adbZip $adbTemp
 New-Item -ItemType Directory -Force "$dist\adb" | Out-Null
-Copy-Item "$adbTemp\platform-tools\adb.exe", "$adbTemp\platform-tools\AdbWinApi.dll", "$adbTemp\platform-tools\AdbWinUsbApi.dll", "$adbTemp\platform-tools\NOTICE.txt" "$dist\adb"
+# Only what ships. Unpacking all of it also failed on a tool we do not use, held by something else.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$adbArchive = [IO.Compression.ZipFile]::OpenRead($adbZip)
+try {
+    foreach ($name in 'adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll', 'NOTICE.txt') {
+        $entry = $adbArchive.GetEntry("platform-tools/$name")
+        if (-not $entry) { throw "$name is missing from platform-tools" }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$dist\adb\$name", $true)
+    }
+} finally {
+    $adbArchive.Dispose()
+}
 
 Write-Host '== Console'
 $env:JAVA_HOME = $JavaHome

@@ -6,6 +6,7 @@
 #include "display.h"
 #include "input.h"
 #include "ipc.h"
+#include "store.h"
 #include "topology.h"
 #include "updater.h"
 
@@ -343,6 +344,99 @@ static void testJson() {
     CHECK(jsonEscape(std::string("\x01")) == "\\u0001");
 }
 
+static void testVddGpu() {
+    const std::string xml = "<x><gpu>\n<friendlyname>default</friendlyname>\n</gpu><other><friendlyname>keep</friendlyname></other></x>";
+    auto intel = setVddGpuInXml(xml, "Intel(R) UHD Graphics");
+    CHECK(intel.has_value());
+    CHECK(intel->find("<friendlyname>Intel(R) UHD Graphics</friendlyname>") != std::string::npos);
+    CHECK(intel->find("<friendlyname>keep</friendlyname>") != std::string::npos);  // nothing else changes
+    CHECK(!setVddGpuInXml(*intel, "Intel(R) UHD Graphics").has_value());           // no change, so no restart
+    CHECK(setVddGpuInXml(*intel, "default").value() == xml);
+    CHECK(setVddGpuInXml(xml, "A&B <C>").value().find("A&amp;B &lt;C&gt;") != std::string::npos);
+    CHECK(!setVddGpuInXml("<x></x>", "a").has_value());
+    CHECK(!setVddGpuInXml("<gpu></gpu><friendlyname>a</friendlyname>", "b").has_value());
+}
+
+static void testVddModeLimit() {
+    const auto sizesOf = [](const std::string& x) {
+        size_t n = 0;
+        for (size_t p = x.find("<resolution>"); p != std::string::npos; p = x.find("<resolution>", p + 1)) ++n;
+        return n;
+    };
+    std::string xml = "<x><global><g_refresh_rate>60</g_refresh_rate></global><resolutions>\n";
+    for (int i = 0; i < 14; ++i)
+        xml += "<resolution><width>" + std::to_string(1000 + i) + "</width><height>500</height><refresh_rate>60</refresh_rate></resolution>\n";
+    xml += "</resolutions></x>";
+    const DisplayMode oldest{1000, 500, 60}, second{1001, 500, 60}, fresh{2000, 1000, 60};
+
+    // Room for no more: the oldest goes, and the one a device is using stays.
+    auto out = addModesToVddXml(xml, {fresh}, {oldest});
+    CHECK(out.has_value());
+    CHECK(sizesOf(*out) == 14);
+    CHECK(out->find("<width>2000</width>") != std::string::npos);
+    CHECK(out->find("<width>1000</width>") != std::string::npos);
+    CHECK(out->find("<width>1001</width>") == std::string::npos);
+
+    // A file over the limit is repaired even when nothing is added: the driver shows no monitors.
+    std::string over = xml;
+    over.insert(over.find("</resolutions>"), "<resolution><width>3000</width><height>500</height><refresh_rate>60</refresh_rate></resolution>\n");
+    auto repaired = addModesToVddXml(over, {second});
+    CHECK(repaired.has_value() && sizesOf(*repaired) == 14);
+    CHECK(repaired->find("<width>1001</width>") != std::string::npos);
+
+    // More rates leave room for fewer sizes.
+    std::string rates = xml;
+    rates.insert(rates.find("</global>"), "<g_refresh_rate>90</g_refresh_rate><g_refresh_rate>120</g_refresh_rate><g_refresh_rate>144</g_refresh_rate><g_refresh_rate>165</g_refresh_rate><g_refresh_rate>244</g_refresh_rate><g_refresh_rate>30</g_refresh_rate>");
+    auto limited = addModesToVddXml(rates, {second});
+    CHECK(limited.has_value() && sizesOf(*limited) == 12);
+
+    // Within the limit, nothing to do.
+    CHECK(!addModesToVddXml(xml, {oldest}).has_value());
+}
+
+static void testVddMonitorCount() {
+    const std::string xml = "<vdd_settings>\n<monitors>\n<count>1</count>\n</monitors>\n<other><count>9</count></other></vdd_settings>";
+    auto four = setVddMonitorCountInXml(xml, 4);
+    CHECK(four.has_value());
+    CHECK(four->find("<monitors>\n<count>4</count>") != std::string::npos);
+    CHECK(four->find("<other><count>9</count>") != std::string::npos);  // nothing else changes
+    CHECK(!setVddMonitorCountInXml(*four, 4).has_value());              // no change, so no reload
+    CHECK(!setVddMonitorCountInXml("<vdd_settings></vdd_settings>", 4).has_value());
+    CHECK(!setVddMonitorCountInXml("<monitors></monitors><count>1</count>", 4).has_value());
+}
+
+static void testDeviceSettings() {
+    DeviceSettings d;
+    d.width = 1920; d.height = 1080; d.hz = 120; d.maxKbps = 25000; d.mirror = true; d.scalePercent = 175; d.custom = true;
+    d.left = -1920; d.top = -40; d.right = 0; d.bottom = 1040;
+    DeviceSettings r;
+    CHECK(parseDeviceSettings(serializeDeviceSettings(d), r));
+    CHECK(r.width == 1920 && r.height == 1080 && r.hz == 120 && r.maxKbps == 25000 && r.mirror && r.scalePercent == 175 && r.custom);
+    CHECK(r.left == -1920 && r.top == -40 && r.right == 0 && r.bottom == 1040);
+    CHECK(r.encoder.empty());
+    d.encoder = "mf|Vendor, Inc. GPU";
+    CHECK(parseDeviceSettings(serializeDeviceSettings(d), r));
+    CHECK(r.encoder == "mf|Vendor, Inc. GPU" && r.bottom == 1040);  // a comma in a name is fine
+    CHECK(r.fill == 0);
+    d.fill = 3;
+    CHECK(parseDeviceSettings(serializeDeviceSettings(d), r));
+    CHECK(r.fill == 3 && r.encoder == "mf|Vendor, Inc. GPU");
+    CHECK(parseDeviceSettings("1,2,3,4,0,6,1,7,8,9,10,mf|Old GPU", r));  // an earlier version, with an encoder
+    CHECK(r.fill == 0 && r.encoder == "mf|Old GPU");
+    CHECK(parseDeviceSettings("1,2,3,4,0,6,1,7,8,9,10", r));        // as written by an earlier version
+    CHECK(r.encoder.empty() && r.bottom == 10);
+    CHECK(!parseDeviceSettings("1,2,3", r));
+    CHECK(!parseDeviceSettings("", r));
+
+    Settings s;
+    s.width = 1280; s.mirror = true; s.allowWireless = false;
+    DeviceSettings kept = d;
+    kept.mirror = false;
+    copyDisplayDefaults(s, kept);
+    CHECK(kept.width == 1280 && kept.mirror && kept.height == 0);
+    CHECK(kept.left == -1920 && kept.custom);  // its place and flag are not defaults
+}
+
 int main() {
     testVddIdentity();
     testRefusesRealDisplay();
@@ -350,6 +444,10 @@ int main() {
     testVddXml();
     testTouchMap();
     testPlaceDisplay();
+    testDeviceSettings();
+    testVddMonitorCount();
+    testVddModeLimit();
+    testVddGpu();
     testUpdateManifest();
     testTouchDevice();
     testLayoutEdit();

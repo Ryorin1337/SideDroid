@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.sidedroid"
-version = "0.0.2"
+version = "0.1.0"
 
 repositories {
     mavenCentral()
@@ -48,7 +48,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.AppImage)
             packageName = "SideDroid"
-            packageVersion = "0.0.2"
+            packageVersion = "0.1.0"
             description = "SideDroid console"
             vendor = "SideDroid"
             // The console only reads pipes and draws: keep the bundled runtime small.

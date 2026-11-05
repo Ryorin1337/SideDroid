@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 
 #include "log.h"
 #include "topology.h"
+#include "vdd_device.h"
 
 namespace sd {
 
@@ -273,7 +275,8 @@ static std::optional<int> numberInTag(const std::string& xml, const char* tag, s
     return atoi(xml.c_str() + a + open.size());
 }
 
-std::optional<std::string> addModesToVddXml(const std::string& xmlIn, const std::vector<DisplayMode>& modes) {
+std::optional<std::string> addModesToVddXml(const std::string& xmlIn, const std::vector<DisplayMode>& modes,
+                                            const std::vector<DisplayMode>& keep) {
     std::string xml = xmlIn;
     bool changed = false;
 
@@ -321,8 +324,69 @@ std::optional<std::string> addModesToVddXml(const std::string& xmlIn, const std:
     }
     xml.insert(resEnd, addSizes);
 
+    // Modes per size: the global rates, plus possibly the size's own.
+    constexpr size_t kMaxSizes = 14, kMaxModes = 14 * 7;
+    const auto wanted = [&](int w, int h) {
+        const auto same = [&](const DisplayMode& m) { return m.width == w && m.height == h; };
+        return std::any_of(modes.begin(), modes.end(), same) || std::any_of(keep.begin(), keep.end(), same);
+    };
+    while (sizes.size() > kMaxSizes || sizes.size() * (rates.size() + 1) > kMaxModes) {
+        const std::string tag = "<resolution>", endTag = "</resolution>";
+        bool removed = false;
+        for (size_t p = xml.find(tag); p != std::string::npos; p = xml.find(tag, p + 1)) {
+            size_t e = xml.find(endTag, p);
+            if (e == std::string::npos) break;
+            auto w = numberInTag(xml, "width", p, e);
+            auto h = numberInTag(xml, "height", p, e);
+            if (!w || !h || wanted(*w, *h)) continue;
+            // With the whitespace in front of it, so that nothing piles up.
+            size_t from = p;
+            while (from > 0 && isspace(static_cast<unsigned char>(xml[from - 1]))) --from;
+            xml.erase(from, e + endTag.size() - from);
+            sizes.erase({*w, *h});
+            removed = changed = true;
+            break;
+        }
+        if (!removed) break;  // everything left is in use
+    }
+
     if (!changed) return std::nullopt;
     return xml;
+}
+
+std::optional<std::string> setVddMonitorCountInXml(const std::string& xml, int count) {
+    const std::string openTag = "<count>";
+    const auto section = xml.find("<monitors>");
+    if (section == std::string::npos) return std::nullopt;
+    const auto a = xml.find(openTag, section);
+    const auto end = xml.find("</monitors>", section);
+    if (a == std::string::npos || end == std::string::npos || a > end) return std::nullopt;
+    const auto from = a + openTag.size();
+    const auto to = xml.find("</count>", from);
+    if (to == std::string::npos || to > end) return std::nullopt;
+    if (atoi(xml.c_str() + from) == count) return std::nullopt;
+    return xml.substr(0, from) + std::to_string(count) + xml.substr(to);
+}
+
+std::optional<std::string> setVddGpuInXml(const std::string& xml, const std::string& gpu) {
+    const std::string openTag = "<friendlyname>", closeTag = "</friendlyname>";
+    const auto section = xml.find("<gpu>");
+    if (section == std::string::npos) return std::nullopt;
+    const auto a = xml.find(openTag, section);
+    const auto end = xml.find("</gpu>", section);
+    if (a == std::string::npos || end == std::string::npos || a > end) return std::nullopt;
+    const auto from = a + openTag.size();
+    const auto to = xml.find(closeTag, from);
+    if (to == std::string::npos || to > end) return std::nullopt;
+    std::string escaped;
+    for (const char c : gpu) {
+        if (c == '&') escaped += "&amp;";
+        else if (c == '<') escaped += "&lt;";
+        else if (c == '>') escaped += "&gt;";
+        else escaped.push_back(c);
+    }
+    if (xml.compare(from, to - from, escaped) == 0) return std::nullopt;
+    return xml.substr(0, from) + escaped + xml.substr(to);
 }
 
 std::wstring vddConfigPath() {
@@ -336,7 +400,8 @@ std::wstring vddConfigPath() {
     return dir + L"\\vdd_settings.xml";
 }
 
-bool ensureVddModes(const std::vector<DisplayMode>& modes, bool* changed) {
+bool ensureVddConfig(const std::vector<DisplayMode>& modes, const std::vector<DisplayMode>& keep, int monitorCount, const std::string& gpu,
+                     bool* changed) {
     if (changed) *changed = false;
     auto path = vddConfigPath();
     FILE* f = _wfopen(path.c_str(), L"rb");
@@ -350,7 +415,13 @@ bool ensureVddModes(const std::vector<DisplayMode>& modes, bool* changed) {
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) xml.append(buf, n);
     fclose(f);
 
-    auto updated = addModesToVddXml(xml, modes);
+    auto updated = addModesToVddXml(xml, modes, keep);
+    if (monitorCount > 0) {
+        if (auto counted = setVddMonitorCountInXml(updated ? *updated : xml, monitorCount)) updated = std::move(counted);
+    }
+    if (!gpu.empty()) {
+        if (auto moved = setVddGpuInXml(updated ? *updated : xml, gpu)) updated = std::move(moved);
+    }
     if (!updated) return true;
 
     // Write beside it and swap, so the driver never reads half a file.
@@ -371,25 +442,54 @@ bool ensureVddModes(const std::vector<DisplayMode>& modes, bool* changed) {
     return true;
 }
 
-bool vddCommand(const std::wstring& command) {
-    constexpr auto name = L"\\\\.\\pipe\\MTTVirtualDisplayPipe";
-    // The driver serves one client at a time and reports busy in between.
-    for (int attempt = 0; attempt < 10; ++attempt) {
-        HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) {
-            DWORD written = 0;
-            BOOL ok = WriteFile(h, command.data(), static_cast<DWORD>(command.size() * sizeof(wchar_t)), &written, nullptr);
-            CloseHandle(h);
-            return ok != FALSE;
-        }
-        DWORD e = GetLastError();
-        if (e == ERROR_FILE_NOT_FOUND) return false;
-        if (e == ERROR_PIPE_BUSY) WaitNamedPipeW(name, 300);
-        else Sleep(100);
+std::optional<DWORD> askDisplayService(const char* word) {
+    constexpr auto name = L"\\\\.\\pipe\\SideDroidDisplayService";
+    constexpr DWORD kTimeoutMs = 60000;  // a device stuck in its driver can take this long
+    HANDLE h = INVALID_HANDLE_VALUE;
+    DWORD openError = ERROR_SUCCESS;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE) break;
+        openError = GetLastError();
+        // Not found also describes the moment between two clients, when the service is
+        // setting up its pipe again, so only trying for a while can tell it is not running.
+        if (openError == ERROR_PIPE_BUSY) WaitNamedPipeW(name, 500);
+        else if (openError == ERROR_FILE_NOT_FOUND) Sleep(100);
+        else return openError;
     }
-    return false;
+    if (h == INVALID_HANDLE_VALUE) return openError;
+
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const auto finish = [&](OVERLAPPED& ov, DWORD* n, BOOL started) {
+        if (!started && GetLastError() != ERROR_IO_PENDING) return false;
+        if (WaitForSingleObject(done, kTimeoutMs) != WAIT_OBJECT_0) {
+            CancelIoEx(h, &ov);
+            GetOverlappedResult(h, &ov, n, TRUE);
+            return false;
+        }
+        return GetOverlappedResult(h, &ov, n, FALSE) != FALSE;
+    };
+    std::string line = std::string(word) + "\n";
+    char reply[32]{};
+    DWORD n = 0;
+    OVERLAPPED wov{};
+    wov.hEvent = done;
+    bool ok = finish(wov, &n, WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &n, &wov));
+    if (ok) {
+        ResetEvent(done);
+        OVERLAPPED rov{};
+        rov.hEvent = done;
+        n = 0;
+        ok = finish(rov, &n, ReadFile(h, reply, sizeof(reply) - 1, &n, &rov));
+    }
+    CloseHandle(done);
+    CloseHandle(h);
+    if (!ok) return ERROR_TIMEOUT;
+    const DWORD result = strtoul(reply, nullptr, 10);
+    if (result == ERROR_SUCCESS) return std::nullopt;
+    return result;
 }
 
-bool vddInstalled() { return vddMonitorPresent(); }
+bool vddInstalled() { return vddDeviceExists(); }
 
 }  // namespace sd

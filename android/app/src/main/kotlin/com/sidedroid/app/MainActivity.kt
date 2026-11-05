@@ -15,15 +15,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface as M3Surface
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -31,6 +30,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -49,6 +50,12 @@ import com.sidedroid.design.DiscoveredHost
 import com.sidedroid.design.DisplayOptionsUi
 import com.sidedroid.design.DisplaySettings
 import com.sidedroid.design.DisplayValue
+import com.sidedroid.design.FILL_FIT
+import com.sidedroid.design.FILL_TILE
+import com.sidedroid.design.pictureRect
+import com.sidedroid.design.tileFraction
+import com.sidedroid.design.tileIndex
+import com.sidedroid.design.tileSize
 import com.sidedroid.design.PairingDialog
 import com.sidedroid.design.PhoneHomeScreen
 import com.sidedroid.design.PhoneHomeState
@@ -56,7 +63,9 @@ import com.sidedroid.design.SideDroidDark
 import com.sidedroid.design.SideDroidLight
 import com.sidedroid.design.SideDroidTheme
 import com.sidedroid.design.StreamInfo
-import com.sidedroid.design.StreamOverlay
+import com.sidedroid.design.DockPlacement
+import com.sidedroid.design.DockSide
+import com.sidedroid.design.StreamDock
 import com.sidedroid.design.UpdateStage
 import com.sidedroid.design.UpdateUi
 import kotlinx.coroutines.Dispatchers
@@ -84,13 +93,13 @@ class MainActivity : ComponentActivity() {
 
     private data class StreamConfig(
         val displayW: Int, val displayH: Int, val encodeW: Int, val encodeH: Int, val fps: Int, val kbps: Int,
-        val mirror: Boolean, val manualW: Int, val manualH: Int, val manualHz: Int, val manualScale: Int,
+        val mirror: Boolean, val manualW: Int, val manualH: Int, val manualHz: Int, val manualScale: Int, val fill: Int,
     )
 
     private val listener = object : NativeBridge.Listener {
-        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int, manualScale: Int) {
+        override fun onConfig(displayW: Int, displayH: Int, encodeW: Int, encodeH: Int, fps: Int, codec: Int, kbps: Int, mirror: Boolean, manualW: Int, manualH: Int, manualHz: Int, manualScale: Int, fill: Int) {
             runOnUiThread {
-                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps, mirror, manualW, manualH, manualHz, manualScale)
+                config = StreamConfig(displayW, displayH, encodeW, encodeH, fps, kbps, mirror, manualW, manualH, manualHz, manualScale, fill)
                 applyPanelRate(fps)
             }
         }
@@ -102,7 +111,13 @@ class MainActivity : ComponentActivity() {
         }
         override fun onDisconnected(reason: String) {
             runOnUiThread {
-                if (streaming) leaveStream(if (reason == "stopped") null else "与电脑的连接已断开")
+                val message = when (reason) {
+                    "stopped" -> null
+                    "host full" -> "这台电脑已连接的设备数已满，请先断开一台"
+                    else -> "与电脑的连接已断开"
+                }
+                // The host can refuse before the code that entered the stream has run.
+                if (streaming) leaveStream(message) else endedBeforeStream = message
             }
         }
         override fun onPaired(secret: ByteArray) {
@@ -110,6 +125,7 @@ class MainActivity : ComponentActivity() {
         }
     }
     private var pendingHostKey: String? = null
+    private var endedBeforeStream: String? = null
     private var currentSurface: Surface? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -156,12 +172,19 @@ class MainActivity : ComponentActivity() {
         val rates = DeviceInfo.refreshRates(this)
         val name = DeviceInfo.deviceName(this)
         val id = pairing.clientId
+        endedBeforeStream = null
         return withContext(Dispatchers.IO) {
             NativeBridge.start(host, PORT, mode, id, secret, code, name, w, h, dpi, caps.codecs, caps.maxLong, caps.maxShort, rates, udp, listener)
         }
     }
 
     private fun enterStream(usb: Boolean) {
+        endedBeforeStream?.let {
+            endedBeforeStream = null
+            NativeBridge.stop()
+            homeError = it
+            return
+        }
         usedUsb = usb
         streaming = true
         homeError = null
@@ -191,9 +214,10 @@ class MainActivity : ComponentActivity() {
         discovery.start()
     }
 
-    private fun panelRatio(): Float {
-        val (w, h) = DeviceInfo.panelSize(this)
-        return w.toFloat() / h.coerceAtLeast(1)
+    private fun useSurface(surface: Surface?) {
+        currentSurface = surface
+        NativeBridge.setSurface(surface)
+        if (surface != null) config?.let { applyPanelRate(it.fps) }
     }
 
     private fun applyPanelRate(fps: Int) {
@@ -341,11 +365,25 @@ class MainActivity : ComponentActivity() {
         else -> "连接失败（$code）"
     }
 
+    private fun loadDockPlacement(): DockPlacement {
+        val prefs = getSharedPreferences("stream_dock", MODE_PRIVATE)
+        return DockPlacement(
+            if (prefs.getBoolean("start", false)) DockSide.Start else DockSide.End,
+            prefs.getFloat("fraction", 0.5f),
+        )
+    }
+
+    private fun saveDockPlacement(p: DockPlacement) {
+        getSharedPreferences("stream_dock", MODE_PRIVATE).edit()
+            .putBoolean("start", p.side == DockSide.Start)
+            .putFloat("fraction", p.fraction)
+            .apply()
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     @Composable
     private fun StreamScreen() {
-        var toolbarOpen by remember { mutableStateOf(false) }
-        var settingsOpen by remember { mutableStateOf(false) }
+        var dockPlacement by remember { mutableStateOf(loadDockPlacement()) }
         var rttMs by remember { mutableStateOf(0) }
         val cfg = config
 
@@ -358,65 +396,74 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-            val ratio = cfg?.let { it.displayW.toFloat() / it.displayH }
-            AndroidView(
-                // Letterboxed within the panel, whichever side the picture is narrower on.
-                modifier = if (ratio != null) Modifier.aspectRatio(ratio, matchHeightConstraintsFirst = ratio < panelRatio()) else Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(object : SurfaceHolder.Callback {
-                            override fun surfaceCreated(h: SurfaceHolder) {
-                                currentSurface = h.surface
-                                NativeBridge.setSurface(h.surface)
-                                config?.let { applyPanelRate(it.fps) }
+        BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            val density = LocalDensity.current
+            val panelW = with(density) { maxWidth.toPx() }
+            val panelH = with(density) { maxHeight.toPx() }
+            // A surface can show one picture in one place, so repeating it takes drawing it ourselves.
+            // Nothing else pays for that.
+            key(cfg?.fill == FILL_TILE) {
+                if (cfg?.fill == FILL_TILE) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            TiledVideoView(ctx, ::useSurface).apply {
+                                setOnTouchListener(TouchForwarder { config?.let { c -> if (c.fill == FILL_TILE) c.displayW to c.displayH else null } })
                             }
-                            override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hh: Int) {}
-                            override fun surfaceDestroyed(h: SurfaceHolder) {
-                                currentSurface = null
-                                NativeBridge.setSurface(null)
+                        },
+                        update = { it.setPicture(cfg.displayW, cfg.displayH) },
+                    )
+                } else {
+                    // The view is the picture, even where it hangs off the screen, so touches need no help.
+                    val shown = if (cfg != null) pictureRect(cfg.fill, panelW, panelH, cfg.displayW, cfg.displayH) else null
+                    AndroidView(
+                        modifier = if (shown != null) Modifier.requiredSize(with(density) { shown.width.toDp() }, with(density) { shown.height.toDp() }) else Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            SurfaceView(ctx).apply {
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(h: SurfaceHolder) = useSurface(h.surface)
+                                    override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hh: Int) {}
+                                    override fun surfaceDestroyed(h: SurfaceHolder) = useSurface(null)
+                                })
+                                setOnTouchListener(TouchForwarder { null })
                             }
-                        })
-                        setOnTouchListener(TouchForwarder())
-                    }
-                },
-            )
+                        },
+                    )
+                }
+            }
 
-            // A small handle on the edge is the only thing drawn over the desktop.
-            Box(
-                Modifier.align(Alignment.CenterEnd)
-                    .padding(end = 2.dp)
-                    .size(width = 8.dp, height = 72.dp)
-                    .background(Color.White.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
-                    .clickable {
-                        toolbarOpen = !toolbarOpen
-                        if (!toolbarOpen) settingsOpen = false
-                    },
-            )
-
-            StreamOverlay(
+            StreamDock(
                 info = cfg?.let {
                     StreamInfo("${it.encodeW}×${it.encodeH}", it.fps, "%.0f Mbps".format(it.kbps / 1000.0), if (usedUsb) "USB" else "Wi-Fi", rttMs)
                 },
-                toolbarOpen = toolbarOpen,
-                settingsOpen = settingsOpen,
-                onToggleToolbar = { toolbarOpen = !toolbarOpen },
-                onOpenSettings = { settingsOpen = !settingsOpen },
+                placement = dockPlacement,
+                onPlacementChange = {
+                    dockPlacement = it
+                    saveDockPlacement(it)
+                },
                 onDisconnect = { leaveStream(null) },
+                // Moving it along the edge would otherwise count as the system's back gesture.
+                tabModifier = Modifier.systemGestureExclusion(),
             ) {
                 // Shown from what the PC reports, so both sides always agree.
                 DisplaySettings(
                     options,
-                    DisplayValue(cfg?.mirror ?: false, cfg?.manualW ?: 0, cfg?.manualH ?: 0, cfg?.manualHz ?: 0, cfg?.manualScale ?: 0),
-                    onChange = { NativeBridge.sendSetDisplay(it.width, it.height, it.hz, it.mirror, it.scale) },
+                    DisplayValue(cfg?.mirror ?: false, cfg?.manualW ?: 0, cfg?.manualH ?: 0, cfg?.manualHz ?: 0, cfg?.manualScale ?: 0, fill = cfg?.fill ?: FILL_FIT),
+                    onChange = { NativeBridge.sendSetDisplay(it.width, it.height, it.hz, it.mirror, it.scale, it.fill) },
                 )
             }
         }
     }
 
-    /** Sends every finger, in view coordinates scaled to 0..65535 of the shown desktop. */
-    private class TouchForwarder : View.OnTouchListener {
+    /**
+     * Sends every finger, in view coordinates scaled to 0..65535 of the shown desktop.
+     * @param tiled the size of the picture when the view repeats it, otherwise null
+     */
+    private class TouchForwarder(private val tiled: () -> Pair<Int, Int>?) : View.OnTouchListener {
         private val buf = IntArray(5 * 10)
+        // Each finger belongs to the copy of the picture it came down on.
+        private val tileColumn = IntArray(256)
+        private val tileRow = IntArray(256)
 
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouch(v: View, e: MotionEvent): Boolean {
@@ -433,10 +480,24 @@ class MainActivity : ComponentActivity() {
                     MotionEvent.ACTION_CANCEL -> 3
                     else -> 1
                 }
-                val x = (e.getX(i) / maxOf(v.width - 1, 1)).coerceIn(0f, 1f)
-                val y = (e.getY(i) / maxOf(v.height - 1, 1)).coerceIn(0f, 1f)
+                val id = e.getPointerId(i) and 0xFF
+                val picture = tiled()
+                val x: Float
+                val y: Float
+                if (picture != null) {
+                    val (tileW, tileH) = tileSize(v.width, v.height, picture.first, picture.second)
+                    if (a == 0) {
+                        tileColumn[id] = tileIndex(e.getX(i), tileW)
+                        tileRow[id] = tileIndex(e.getY(i), tileH)
+                    }
+                    x = tileFraction(e.getX(i), tileW, tileColumn[id])
+                    y = tileFraction(e.getY(i), tileH, tileRow[id])
+                } else {
+                    x = (e.getX(i) / maxOf(v.width - 1, 1)).coerceIn(0f, 1f)
+                    y = (e.getY(i) / maxOf(v.height - 1, 1)).coerceIn(0f, 1f)
+                }
                 val o = n * 5
-                buf[o] = e.getPointerId(i) and 0xFF
+                buf[o] = id
                 buf[o + 1] = a
                 buf[o + 2] = (x * 65535).toInt()
                 buf[o + 3] = (y * 65535).toInt()
