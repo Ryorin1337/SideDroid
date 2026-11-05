@@ -1,5 +1,8 @@
-# Builds the release: host, console, Android APK and the MSI, into out\.
-# Windows parts build here; the APK builds inside WSL, where the Android SDK lives.
+# Builds every release file into out\:
+#   SideDroid-<version>-x64.msi       full Windows package
+#   SideDroid-<version>-android-*.apk one per CPU type, and a universal one
+#   SHA256SUMS.txt
+# Windows parts build here; the APKs build inside WSL, where the Android SDK lives.
 param(
     [string]$Version = '0.0.1',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
@@ -12,6 +15,10 @@ $dist = Join-Path $out 'dist'
 $tools = Join-Path $out 'tools'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Force $dist, $tools | Out-Null
+
+# Files of an earlier build must not end up in this release's checksums.
+Get-ChildItem "$out\SideDroid-*" -File | Where-Object { -not ($SkipApk -and $_.Extension -eq '.apk') } | Remove-Item
+Remove-Item "$out\SHA256SUMS.txt" -ErrorAction SilentlyContinue
 
 function Require-Success($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
 
@@ -68,7 +75,9 @@ if (-not $SkipApk) {
     Write-Host '== Android (in WSL)'
     & wsl.exe --cd "$root" -e bash -l scripts/build_apk.sh
     Require-Success 'android build'
-    Copy-Item "$root\android\app\build\outputs\apk\release\app-release.apk" (Join-Path $out "SideDroid-$Version.apk") -Force
+    foreach ($abi in 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'universal') {
+        Copy-Item "$root\android\app\build\outputs\apk\release\app-$abi-release.apk" (Join-Path $out "SideDroid-$Version-android-$abi.apk") -Force
+    }
 }
 
 Write-Host '== MSI'
@@ -80,8 +89,15 @@ if (-not (Test-Path $wix)) {
     & $wix extension add -g WixToolset.Util.wixext/5.0.2 | Out-Null
     Require-Success 'install wix util extension'
 }
-$msi = Join-Path $out "SideDroid-$Version.msi"
+$msi = Join-Path $out "SideDroid-$Version-x64.msi"
 & $wix build "$root\installer\Product.wxs" -arch x64 -ext WixToolset.Util.wixext -d "Version=$Version" -d "Dist=$dist" -d "IconFile=$root\host\resources\sidedroid.ico" -o $msi
 Require-Success 'wix build'
+Remove-Item "$out\SideDroid-*.wixpdb" -ErrorAction SilentlyContinue
+
+Write-Host '== Checksums'
+$files = Get-ChildItem $out -File | Where-Object { $_.Name -like 'SideDroid-*' } | Sort-Object Name
+$lines = $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+# Plain LF and no BOM, so that sha256sum -c accepts the file.
+[IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), (($lines -join "`n") + "`n"))
+
 Get-ChildItem $out -File | Select-Object Name, Length | Format-Table -AutoSize
-Write-Host "Built $msi"

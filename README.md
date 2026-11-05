@@ -47,11 +47,19 @@
 - Android 8 或更高版本。Android 11 起有官方低延迟解码接口，更老的设备延迟可能更高
 
 **步骤：**
-1. 从 [Releases](https://github.com/Ryorin1337/SideDroid/releases/latest) 下载 MSI 和 APK。
+1. 从 [Releases](https://github.com/Ryorin1337/SideDroid/releases/latest) 下载电脑端和手机端的安装包，见下表。
 2. 在电脑上运行 MSI，打开控制台后点“安装驱动”，并确认 Windows 的提示。
 3. 在手机上安装 APK。
 
-安装包目前没有代码签名，Windows 和 Android 可能会提示风险。
+| 设备 | 文件 | 说明 |
+|---|---|---|
+| 电脑（64 位 Windows） | `SideDroid-*-x64.msi` | 安装包 |
+| 大多数手机和平板 | `SideDroid-*-android-arm64-v8a.apk` | 64 位 ARM（ARMv8） |
+| 较老的手机 | `SideDroid-*-android-armeabi-v7a.apk` | 32 位 ARM（ARMv7） |
+| 模拟器、部分 Chromebook | `SideDroid-*-android-x86_64.apk` | x86_64 |
+| 不确定选哪个 | `SideDroid-*-android-universal.apk` | 包含以上所有类型，体积最大 |
+
+MSI 目前没有代码签名，Windows 可能会提示风险。APK 不是从应用商店安装的，Android 也可能提示。
 
 ## 连接
 
@@ -83,6 +91,8 @@
 ```powershell
 .\scripts\package.ps1   # 产物输出到 out\
 ```
+
+构建 APK 还需要你自己的签名密钥。在 `android/keystore.properties`（已被 git 忽略）里写好 `storeFile`（WSL 路径）、`storePassword`、`keyAlias` 和 `keyPassword`。
 
 | 目录 | 内容 |
 |---|---|
