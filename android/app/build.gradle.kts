@@ -5,8 +5,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// The release key stays out of the repository. See "从源码构建" in the README.
-val signingFile = rootProject.file("keystore.properties")
+// The release key and its properties stay under the user's Android profile.
+val signingFile = providers.gradleProperty("signingProperties").orNull?.let { file(it) }
+    ?: rootProject.file("keystore.properties")
 
 android {
     namespace = "com.sidedroid.app"
@@ -18,8 +19,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // Only ever goes up from here: Android refuses to install a lower one over an existing app.
-        versionCode = 4
-        versionName = "0.1.0"
+        versionCode = 5
+        versionName = "0.1.1"
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DANDROID_STL=c++_static", "-DSIDEDROID_BUILD_TESTS=OFF")
@@ -47,6 +48,7 @@ android {
             create("release") {
                 val p = Properties().apply { signingFile.inputStream().use { load(it) } }
                 storeFile = file(p.getProperty("storeFile"))
+                storeType = p.getProperty("storeType", "JKS")
                 storePassword = p.getProperty("storePassword")
                 keyAlias = p.getProperty("keyAlias")
                 keyPassword = p.getProperty("keyPassword")

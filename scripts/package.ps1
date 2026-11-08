@@ -5,7 +5,7 @@
 #   update.json                       goes in the repository once the release is public
 # Windows parts build here; the APKs build inside WSL, where the Android SDK lives.
 param(
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.1.1',
     # What the update prompt says. Separate lines with `n.
     [string]$Notes = '',
     [string]$JavaHome = 'C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot',
@@ -13,6 +13,27 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path "$PSScriptRoot\.."
+
+# Prefer an installed SDK over the runtime-only dotnet host on PATH.
+$dotnet = 'D:\dotnet\sdkx\dotnet.exe'
+if (-not (Test-Path $dotnet)) {
+    $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+}
+if (-not (& $dotnet --list-sdks)) { throw "No .NET SDK found through $dotnet" }
+$env:DOTNET_ROOT = Split-Path -Parent $dotnet
+$env:PATH = "$env:DOTNET_ROOT;$env:PATH"
+
+$cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
+$ctest = (Get-Command ctest -ErrorAction SilentlyContinue).Source
+if (-not $cmake -or -not $ctest) {
+    $vsCmakeBin = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+    if (Test-Path (Join-Path $vsCmakeBin 'cmake.exe')) {
+        $cmake = Join-Path $vsCmakeBin 'cmake.exe'
+        $ctest = Join-Path $vsCmakeBin 'ctest.exe'
+    } else {
+        throw 'CMake and CTest are not available on PATH or in Visual Studio Build Tools.'
+    }
+}
 
 # The version lives in several build files, and the updater compares against them.
 foreach ($check in @(
@@ -30,18 +51,27 @@ $tools = Join-Path $out 'tools'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Force $dist, $tools | Out-Null
 
-# Files of an earlier build must not end up in this release's checksums.
-Get-ChildItem "$out\SideDroid-*" -File | Where-Object { -not ($SkipApk -and $_.Extension -eq '.apk') } | Remove-Item
+# Replace only this version's outputs; keep prior builds available for review.
+Get-ChildItem (Join-Path $out "SideDroid-$Version-*") -File -ErrorAction SilentlyContinue |
+    Where-Object { -not ($SkipApk -and $_.Extension -eq '.apk') } | Remove-Item
 Remove-Item "$out\SHA256SUMS.txt", "$out\update.json" -ErrorAction SilentlyContinue
 
 function Require-Success($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
 
 Write-Host '== Host'
-& cmake -S $root -B "$root\build" -G 'Visual Studio 18 2026' -A x64 | Out-Null
+$generator = 'Visual Studio 18 2026'
+$cache = Join-Path $root 'build\CMakeCache.txt'
+if (Test-Path $cache) {
+    $generatorLine = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
+    if ($generatorLine) { $generator = $generatorLine.Matches[0].Groups[1].Value }
+} elseif (Test-Path 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat') {
+    $generator = 'Visual Studio 17 2022'
+}
+& $cmake -S $root -B "$root\build" -G $generator -A x64 | Out-Null
 Require-Success 'cmake configure'
-& cmake --build "$root\build" --config Release --parallel | Out-Null
+& $cmake --build "$root\build" --config Release --parallel | Out-Null
 Require-Success 'cmake build'
-& ctest --test-dir "$root\build" -C Release --output-on-failure
+& $ctest --test-dir "$root\build" -C Release --output-on-failure
 Require-Success 'host and core tests'
 Copy-Item "$root\build\host\Release\sidedroid-host.exe", "$root\build\host\Release\sidedroid-driver-tool.exe", "$root\build\host\Release\sidedroid-service.exe" $dist
 
@@ -95,7 +125,24 @@ Copy-Item "$root\LICENSE" "$dist\LICENSE.txt"
 
 if (-not $SkipApk) {
     Write-Host '== Android (in WSL)'
-    & wsl.exe --cd "$root" -e bash -l scripts/build_apk.sh
+    $signingProperties = Join-Path $env:USERPROFILE '.android\SideDroid-signing.properties'
+    if (-not (Test-Path $signingProperties)) { throw "Signing properties missing: $signingProperties" }
+    $signingConfig = @{}
+    foreach ($line in [IO.File]::ReadAllLines($signingProperties)) {
+        $property = [regex]::Match($line, '^\s*([^#!\s][^=:]*?)\s*[=:]\s*(.*)$')
+        if ($property.Success) { $signingConfig[$property.Groups[1].Value.Trim()] = $property.Groups[2].Value }
+    }
+    foreach ($name in 'storeFile', 'storeType', 'storePassword', 'keyAlias', 'keyPassword') {
+        if (-not $signingConfig.ContainsKey($name) -or [string]::IsNullOrWhiteSpace($signingConfig[$name])) {
+            throw "Android signing property '$name' is missing or empty in $signingProperties"
+        }
+    }
+    if (-not $signingConfig['storeFile'].StartsWith('/')) { throw 'Android storeFile must be a WSL path' }
+    & wsl.exe -e test -r $signingConfig['storeFile']
+    Require-Success 'validate Android signing keystore'
+    $wslSigningProperties = (& wsl.exe -e wslpath -a $signingProperties).Trim()
+    Require-Success 'convert signing properties path'
+    & wsl.exe --cd "$root" -e env "SIDEDROID_SIGNING_PROPERTIES=$wslSigningProperties" bash -l scripts/build_apk.sh
     Require-Success 'android build'
     foreach ($abi in 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'universal') {
         Copy-Item "$root\android\app\build\outputs\apk\release\app-$abi-release.apk" (Join-Path $out "SideDroid-$Version-android-$abi.apk") -Force
@@ -106,7 +153,7 @@ Write-Host '== MSI'
 $wix = Join-Path $tools 'wix\wix.exe'
 if (-not (Test-Path $wix)) {
     # WiX 5 is pinned: later major versions come with different licence terms.
-    & dotnet tool install wix --version 5.0.2 --tool-path (Join-Path $tools 'wix') | Out-Null
+    & $dotnet tool install wix --version 5.0.2 --tool-path (Join-Path $tools 'wix') | Out-Null
     Require-Success 'install wix'
     & $wix extension add -g WixToolset.Util.wixext/5.0.2 | Out-Null
     Require-Success 'install wix util extension'
@@ -117,7 +164,7 @@ Require-Success 'wix build'
 Remove-Item "$out\SideDroid-*.wixpdb" -ErrorAction SilentlyContinue
 
 Write-Host '== Checksums'
-$files = Get-ChildItem $out -File | Where-Object { $_.Name -like 'SideDroid-*' } | Sort-Object Name
+$files = Get-ChildItem $out -File | Where-Object { $_.Name -like "SideDroid-$Version-*" } | Sort-Object Name
 $lines = $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
 # Plain LF and no BOM, so that sha256sum -c accepts the file.
 [IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), (($lines -join "`n") + "`n"))

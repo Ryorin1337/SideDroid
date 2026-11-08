@@ -53,7 +53,7 @@ RateController::Signal RateController::classify(const Stats& s, double backlogMs
 RateTarget RateController::update(const Stats& s, double backlogMs) {
     // Nothing arrived, as while the display is being rebuilt, so this says nothing about the path.
     // Climbing here would have every device come back at once, far above what they had found.
-    if (s.bytes == 0 && s.packetsReceived == 0 && s.packetsLost == 0 && backlogMs <= 0) return target_;
+    if (s.bytes == 0 && s.packetsReceived == 0 && s.packetsLost == 0 && s.framesDropped == 0 && backlogMs <= 0) return target_;
     Signal sig = classify(s, backlogMs);
     if (limits_.udp) target_.parityPercent = fecForLoss(lossEma_);
     if (cooldown_ > 0) --cooldown_;

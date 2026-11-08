@@ -164,7 +164,7 @@ struct Stats {
     uint32_t packetsLost = 0;       // never arrived, before FEC and NACK
     uint32_t framesDropped = 0;     // unrecoverable
     int32_t delayGradientUs = 0;    // growth of one-way delay across the window
-    uint32_t decodeUs = 0;          // decoder input to output, average
+    uint32_t decodeUs = 0;          // latest receive-to-decode-output time, including local queueing
     uint32_t rttUs = 0;
 };
 

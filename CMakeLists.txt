@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SideDroid VERSION 0.1.0 LANGUAGES C CXX)
+project(SideDroid VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,11 @@ if(SIDEDROID_BUILD_TESTS)
 endif()
 
 add_subdirectory(core)
+if(SIDEDROID_BUILD_TESTS)
+    add_executable(decoder_queue_tests android/app/src/test/cpp/decoder_queue_tests.cpp)
+    target_include_directories(decoder_queue_tests PRIVATE core/include)
+    add_test(NAME decoder_queue_tests COMMAND decoder_queue_tests)
+endif()
 if(WIN32)
     add_subdirectory(host)
 endif()

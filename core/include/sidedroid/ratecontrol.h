@@ -31,6 +31,7 @@ public:
     // Host-side backlog (TCP send queue depth or similar) counts as congestion.
     RateTarget update(const Stats& s, double senderBacklogMs);
     const RateTarget& target() const { return target_; }
+    double queueDelayUs() const { return queueUs_; }
     void setLimits(const RateLimits& limits);
 
 private:

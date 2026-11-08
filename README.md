@@ -78,13 +78,13 @@ MSI 会安装系统服务 `SideDroidService`，它只负责在连接和断开时
 
 ## 当前状态
 
-这是早期版本（0.1.0）。主要在一台 NVIDIA 显卡的笔记本上开发和测试，AMD AMF 只在一位用户的 Radeon Vega 8 上跑通过。以下情况还没有充分验证：
+这是早期版本（0.1.1）。主要在一台 NVIDIA 显卡的笔记本上开发和测试，AMD AMF 只在一位用户的 Radeon Vega 8 上跑通过。以下情况还没有充分验证：
 
 - AMD 显卡上的丢包、限速和 H.264，以及其他型号的 AMD 显卡
 - 真实 Wi-Fi 环境下的长时间使用，以及多台设备共用 Wi-Fi
 - Android 8 到 10 的设备，以及平板真机
 
-遇到问题欢迎提 [Issue](https://github.com/Ryorin1337/SideDroid/issues)，并附上 `%LOCALAPPDATA%\SideDroid\host.log` 和 `adb logcat -s SideDroid` 的输出。
+遇到问题欢迎提 [Issue](https://github.com/Ryorin1337/SideDroid/issues)，并附上 `%LOCALAPPDATA%\SideDroid\host.log` 和 `adb logcat -s SideDroid` 的输出。卡顿或反复降档的排查方法见 [延迟诊断](docs/troubleshooting.md)。
 
 **已知限制：**
 - 触控无法操作管理员权限的窗口和 UAC 界面。
@@ -102,7 +102,7 @@ MSI 会安装系统服务 `SideDroidService`，它只负责在连接和断开时
 .\scripts\package.ps1   # 产物输出到 out\
 ```
 
-构建 APK 还需要你自己的签名密钥。在 `android/keystore.properties`（已被 git 忽略）里写好 `storeFile`（WSL 路径）、`storePassword`、`keyAlias` 和 `keyPassword`。
+构建 APK 需要发布签名密钥。打包脚本从 `%USERPROFILE%\.android\SideDroid-signing.properties` 读取配置，密钥文件默认是同目录下的 `SideDroid-release.jks`；配置中的 `storeFile` 必须是 WSL 可访问的路径。缺少配置或密钥时，打包会失败，不会生成未签名 APK。密钥和配置不应放进仓库或提交版本控制。
 
 | 目录 | 内容 |
 |---|---|
@@ -113,16 +113,18 @@ MSI 会安装系统服务 `SideDroidService`，它只负责在连接和断开时
 | `android/` | Android 应用和 NDK 媒体层 |
 | `installer/` | MSI 安装包定义 |
 
-协议细节见 [docs/protocol.md](docs/protocol.md)。
+## 开发文档
 
-## 发布新版本
-
-1. 改版本号：`CMakeLists.txt`、`android/app/build.gradle.kts`（`versionCode` 也要加一）、`ui/console/build.gradle.kts`、`ui/design/.../About.kt`、`package.ps1` 的默认值和本文的“当前状态”。
-2. 运行 `.\scripts\package.ps1 -Notes "更新说明"`。
-3. 提交、打标签 `v<版本号>`，把 `out\` 里的 MSI、APK 和 `SHA256SUMS.txt` 发布到 Release。
-4. **Release 公开后**，把 `out\update.json` 复制到仓库根目录，提交并推送。用户的客户端读到它就会提示更新，所以顺序不能反，否则用户会下载失败。
-
-电脑端每 12 小时、手机端每次启动时读取一次 `update.json`。其中只有版本号、说明和各文件的 SHA-256，下载地址固定为这个仓库的 Release。
+| 文档 | 内容 |
+|---|---|
+| [开发须知](CLAUDE.md) | 开发约定、构建、测试和发布操作 |
+| [协议](docs/protocol.md) | 连接、握手、加密、消息字段、UDP FEC 和控制台 IPC |
+| [显示布局](docs/displays.md) | Windows 虚拟屏、驱动生命周期、镜像和布局恢复 |
+| [编码器](docs/encoders.md) | 编码器选择、实现依据和已验证范围 |
+| [码率控制](docs/ratecontrol.md) | 延迟统计、拥塞判断和降档恢复 |
+| [Android 解码与显示](docs/android.md) | 解码队列、输出调度和画面适配 |
+| [更新机制与发布](docs/updates.md) | 更新清单、校验和发布顺序 |
+| [延迟诊断](docs/troubleshooting.md) | 日志、时间口径和当前验证范围 |
 
 ## 致谢和许可
 

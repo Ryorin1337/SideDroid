@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 
+#include "sidedroid/delaystats.h"
 #include "sidedroid/fec.h"
 #include "sidedroid/secure.h"
 
@@ -52,6 +53,8 @@ public:
     void sendSetDisplay(const SetDisplay& s);
     void requestKeyframe();
     void reportDecodeUs(uint32_t us);
+    // Reports decoder overload; configuration and surface resets are not drops.
+    void reportDecoderDrop();
 
     uint32_t lastRttUs() const { return rttUs_.load(); }
     uint64_t totalFramesDropped() const { return totalDropped_.load(); }
@@ -84,9 +87,7 @@ private:
     // Window counters, reset by the stats thread.
     std::atomic<uint32_t> winBytes_{0}, winFrames_{0}, winPackets_{0}, winLost_{0}, winDropped_{0};
     std::atomic<uint32_t> decodeUs_{0}, rttUs_{0};
-    std::atomic<int64_t> minDelayUs_{INT64_MAX}, lastAvgDelayUs_{0};
-    std::atomic<int64_t> sumDelayUs_{0};
-    std::atomic<uint32_t> delaySamples_{0};
+    DelayStats delayStats_;
 };
 
 }  // namespace sd

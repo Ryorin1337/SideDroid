@@ -1,6 +1,7 @@
 // Dependency-free tests for the protocol core. Exits non-zero on failure.
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <thread>
 
@@ -319,6 +320,19 @@ static void testRatecontrol() {
         CHECK(quiet.target().bitrateKbps == settled);
     }
 
+    // Decoder drops remain congestion signals when no new bytes arrive.
+    {
+        RateController decoderLimited(l);
+        Stats dropped{};
+        dropped.windowMs = 100;
+        dropped.framesDropped = 1;
+        const uint32_t before = decoderLimited.target().bitrateKbps;
+        decoderLimited.update(dropped, 0);
+        // An asynchronous decoder can drop the last received frame after its
+        // bytes and packets were already reported in the preceding window.
+        CHECK(decoderLimited.target().bitrateKbps < before);
+    }
+
     // Sender backlog alone counts as congestion on TCP, where loss is invisible.
     RateLimits t = l;
     t.udp = false;
@@ -327,6 +341,127 @@ static void testRatecontrol() {
     for (int i = 0; i < 20; ++i) rt.update(good, 100);
     CHECK(rt.target().bitrateKbps < before);
     CHECK(rt.target().parityPercent == 0);
+}
+
+static void testDelayStats() {
+    for (int64_t offset : {-9'000'000'000'000ll, -1'000'000ll, 0ll, 1'000'000ll, 9'000'000'000'000ll}) {
+        DelayStats delay;
+        uint64_t capture = 100'000'000'000'000ull;
+        auto add = [&](int64_t queueUs) {
+            capture += 10000;
+            delay.add(capture, static_cast<uint64_t>(static_cast<int64_t>(capture) + offset + queueUs));
+        };
+        auto empty = delay.take();
+        CHECK(empty.samples == 0 && empty.gradientUs == 0);
+        // Different window sizes must not turn a fixed clock offset into queue growth.
+        for (int count : {10, 11, 9, 1, 14}) {
+            for (int i = 0; i < count; ++i) add(0);
+            auto window = delay.take();
+            CHECK(window.samples == static_cast<uint64_t>(count) && window.gradientUs == 0);
+        }
+        empty = delay.take();
+        CHECK(empty.samples == 0 && empty.gradientUs == 0);
+        // A previous average of zero is valid; silence must not erase it.
+        add(30000);
+        auto rising = delay.take();
+        CHECK(rising.samples == 1 && rising.gradientUs == 30000);
+        CHECK(delay.take().gradientUs == 0);
+        add(30000);
+        CHECK(delay.take().gradientUs == 0);
+        add(-20000);
+        CHECK(delay.take().gradientUs == -50000);
+        add(10000);
+        add(20000);
+        add(30000);
+        auto mixed = delay.take();
+        CHECK(mixed.samples == 3 && mixed.gradientUs == 40000);
+    }
+
+    // Preserve the sign of changes too large for the existing wire field.
+    {
+        DelayStats delay;
+        delay.add(100, 100);
+        CHECK(delay.take().gradientUs == 0);
+        const uint64_t large = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 10000;
+        delay.add(100, 100 + large);
+        CHECK(delay.take().gradientUs == std::numeric_limits<int32_t>::max());
+        delay.add(100, 100);
+        CHECK(delay.take().gradientUs == std::numeric_limits<int32_t>::min());
+        delay.add(100, 100);
+        CHECK(delay.take().gradientUs == 0);
+    }
+    // Large unsigned clock origins must not overflow signed timestamp subtraction.
+    for (bool largeHostClock : {false, true}) {
+        DelayStats delay;
+        const uint64_t large = std::numeric_limits<uint64_t>::max() - 1000000;
+        const uint64_t capture = largeHostClock ? large : 100;
+        const uint64_t arrival = largeHostClock ? 100 : large;
+        delay.add(capture, arrival);
+        CHECK(delay.take().gradientUs == 0);
+        delay.add(capture + 1000, arrival + 31000);
+        CHECK(delay.take().gradientUs == 30000);
+    }
+}
+
+static void testConcurrentDelayStats() {
+    DelayStats delay;
+    const uint64_t capture = 1000000, arrival = 9'000'000'000'000ull;
+    delay.add(capture, arrival);
+    CHECK(delay.take().gradientUs == 0);
+    delay.add(capture + 1000, arrival + 41000);
+    CHECK(delay.take().gradientUs == 40000);
+
+    constexpr int rounds = 10000;
+    std::atomic<int> begin{0}, finished{0};
+    std::thread receiver([&] {
+        for (int round = 1; round <= rounds; ++round) {
+            while (begin.load() < round) std::this_thread::yield();
+            const uint64_t elapsed = 1000 + static_cast<uint64_t>(round) * 1000;
+            delay.add(capture + elapsed, arrival + elapsed + 40000);
+            finished = round;
+        }
+    });
+    for (int round = 1; round <= rounds; ++round) {
+        begin = round;
+        // Race one complete sample against the snapshot. Either window may win,
+        // but its sum and count must stay together, with no invented gradient.
+        auto first = delay.take();
+        while (finished.load() < round) std::this_thread::yield();
+        auto second = delay.take();
+        CHECK(first.samples + second.samples == 1);
+        CHECK(first.gradientUs == 0 && second.gradientUs == 0);
+    }
+    receiver.join();
+    CHECK(delay.take().samples == 0);
+}
+
+static void testDelayStatsRatecontrol() {
+    for (int64_t offset : {-9'000'000'000'000ll, 0ll, 9'000'000'000'000ll}) {
+        DelayStats delay;
+        RateLimits limits;
+        RateController rate(limits);
+        uint64_t capture = 100'000'000'000'000ull;
+        Stats stats{};
+        stats.windowMs = 100;
+        stats.bytes = 200000;
+        stats.packetsReceived = 100;
+        auto window = [&](int64_t queueUs, int count) {
+            for (int i = 0; i < count; ++i) {
+                capture += 1000;
+                delay.add(capture, static_cast<uint64_t>(static_cast<int64_t>(capture) + offset + queueUs));
+            }
+            stats.delayGradientUs = delay.take().gradientUs;
+            rate.update(stats, 0);
+        };
+        const auto start = rate.target().bitrateKbps;
+        for (int i = 0; i < 40; ++i) window(0, 1 + i % 14);
+        CHECK(rate.target().bitrateKbps >= start);
+        CHECK(rate.target().fps == limits.maxFps && rate.target().scalePercent == 100);
+        const auto beforeGrowth = rate.target().bitrateKbps;
+        for (int i = 1; i <= 20; ++i) window(i * 5000, 10);
+        CHECK(stats.delayGradientUs == 5000);
+        CHECK(rate.target().bitrateKbps < beforeGrowth);
+    }
 }
 
 static void testSecure() {
@@ -447,7 +582,9 @@ int main() {
     netInit();
     const struct { const char* name; void (*fn)(); } tests[] = {
         {"wire", testWire}, {"fill", testFillOnTheWire}, {"reed-solomon", testReedSolomon}, {"assembler", testAssembler},
-        {"ratecontrol", testRatecontrol}, {"secure", testSecure}, {"handshake", testHandshake},
+        {"ratecontrol", testRatecontrol}, {"delay-stats", testDelayStats},
+        {"concurrent-delay-stats", testConcurrentDelayStats}, {"delay-stats-ratecontrol", testDelayStatsRatecontrol},
+        {"secure", testSecure}, {"handshake", testHandshake},
         {"channel", testChannel}};
     for (const auto& t : tests) {
         std::printf("[ RUN ] %s\n", t.name);

@@ -3,8 +3,9 @@
 set -euo pipefail
 export ANDROID_HOME="${ANDROID_HOME:-/root/android-sdk}"
 cd "$(dirname "$0")/../android"
-if [ ! -f keystore.properties ]; then
-    echo "android/keystore.properties is missing: it names the release key" >&2
+signing_properties="${SIDEDROID_SIGNING_PROPERTIES:-$PWD/keystore.properties}"
+if [ ! -f "$signing_properties" ]; then
+    echo "Signing properties not found: $signing_properties" >&2
     exit 1
 fi
-./gradlew :app:assembleRelease --console=plain -q
+./gradlew :app:assembleRelease --console=plain -q -PsigningProperties="$signing_properties"

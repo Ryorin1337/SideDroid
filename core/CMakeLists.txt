@@ -4,6 +4,7 @@ add_library(sidedroid_core STATIC
     src/secure.cpp
     src/fec.cpp
     src/ratecontrol.cpp
+    src/delaystats.cpp
     src/client.cpp
     third_party/monocypher/monocypher.c
 )

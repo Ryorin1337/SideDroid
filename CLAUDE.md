@@ -1,6 +1,6 @@
 # SideDroid 开发须知
 
-把 Android 手机或平板变成 Windows 第二块屏幕的开源工具。功能和用法见 [README.md](README.md)，协议、显示布局和更新机制见 [docs/protocol.md](docs/protocol.md)。
+把 Android 手机或平板变成 Windows 第二块屏幕的开源工具。功能、用法和开发文档导航见 [README.md](README.md)。通信约定见 [协议](docs/protocol.md)，实现按 [显示布局](docs/displays.md)、[编码器](docs/encoders.md)、[码率控制](docs/ratecontrol.md)、[Android 解码与显示](docs/android.md) 分开记录；更新和排障分别见 [更新机制与发布](docs/updates.md)、[延迟诊断](docs/troubleshooting.md)。
 
 ## 环境
 
@@ -12,7 +12,7 @@
 
 - 界面文字用中文，代码、注释和提交信息用英文。
 - 提交信息和 PR 描述**不要写 `Claude-Session` 或任何会话链接**，这是公开仓库。`Co-Authored-By` 可以保留。
-- 改动协议、显示布局或更新机制时，同步更新 `docs/protocol.md`。用户能感知的变化同步更新 `README.md`。
+- 改动通信字段时更新 `docs/protocol.md`；显示布局、码率控制、Android 实现、更新机制分别更新 `docs/displays.md`、`docs/ratecontrol.md`、`docs/android.md`、`docs/updates.md`。日志和测量口径写入 `docs/troubleshooting.md`，不要混入协议文档。用户能感知的变化同步更新 `README.md`。
 - 不支持 32 位 Windows：虚拟显示驱动和 Compose 控制台都没有 32 位版本。
 
 ## 版本号
@@ -43,8 +43,8 @@
 
 ## 签名密钥
 
-- 密钥是 `android/sidedroid-release.jks`，配置和密码在 `android/keystore.properties`，两者都被 git 忽略，绝不能提交，也不要输出到日志。
-- `git clean -fdx` 或删除项目文件夹都会丢失它们，要先另外备份。
+- 发布密钥和配置在 `%USERPROFILE%\.android\SideDroid-release.jks` 与 `%USERPROFILE%\.android\SideDroid-signing.properties`，均在仓库外；绝不能提交密钥或输出密码。
+- 密钥在仓库外，但仍是本机数据；更换 Windows 用户配置或迁移到新电脑前，要先安全备份。
 - 丢失或更换密钥后，所有用户都得卸载重装。
 - 缺少密钥时构建会直接报错，不要退回调试签名。
 

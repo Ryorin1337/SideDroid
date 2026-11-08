@@ -895,18 +895,27 @@ void Session::recvLoop() {
             if (auto s = decodeStats(body)) {
                 double backlog = useUdp_ ? 0 : backlogMs();
                 bool changed = false;
-                RateTarget t;
+                RateTarget t, previous;
+                double queueUs = 0;
                 {
                     std::lock_guard<std::mutex> lock(rateMutex_);
+                    previous = target_;
                     if (rate_) {
                         t = rate_->update(*s, backlog);
                         changed = !(t == target_);
                         target_ = t;
+                        queueUs = rate_->queueDelayUs();
                     }
                 }
                 if (changed) targetDirty_ = true;
                 uint32_t total = s->packetsReceived + s->packetsLost;
                 const double loss = total ? 100.0 * s->packetsLost / total : 0;
+                if (changed && (t.bitrateKbps < previous.bitrateKbps || t.fps != previous.fps || t.scalePercent != previous.scalePercent)) {
+                    logf("rate: %s %u->%u kbps %d->%d fps scale %d->%d; queue=%.2fms gradient=%.2fms loss=%.1f%% dropped=%u backlog=%.2fms decode=%.2fms rtt=%.2fms",
+                         hello_.deviceName.c_str(), previous.bitrateKbps, t.bitrateKbps, previous.fps, t.fps,
+                         previous.scalePercent, t.scalePercent, queueUs / 1000.0, s->delayGradientUs / 1000.0,
+                         loss, s->framesDropped, backlog, s->decodeUs / 1000.0, s->rttUs / 1000.0);
+                }
                 const double kbpsSeen = s->windowMs ? s->bytes * 8.0 / s->windowMs : 0;
                 publish([&](LiveStatus& l) {
                     l.lossPercent = l.lossPercent * 0.8 + loss * 0.2;

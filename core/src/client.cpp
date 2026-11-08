@@ -86,11 +86,7 @@ void Client::handleFrameMessage(const uint8_t* data, size_t size) {
 
     winBytes_.fetch_add(static_cast<uint32_t>(size));
 
-    // Host and client clocks differ, but the change of their difference is
-    // exactly the growth of the queue, which is all the rate controller needs.
-    int64_t delay = static_cast<int64_t>(monotonicUs()) - static_cast<int64_t>(h.captureUs);
-    sumDelayUs_.fetch_add(delay);
-    delaySamples_.fetch_add(1);
+    delayStats_.add(h.captureUs, monotonicUs());
 
     // After a loss, P-frames reference data the decoder never had.
     if (awaitingKey_.load()) {
@@ -248,13 +244,7 @@ void Client::statsLoop() {
             lastKeyRequestUs_ = now;
             requestKeyframe();
         }
-        uint32_t samples = delaySamples_.exchange(0);
-        int64_t sum = sumDelayUs_.exchange(0);
-        if (samples > 0) {
-            int64_t avg = sum / samples;
-            int64_t prev = lastAvgDelayUs_.exchange(avg);
-            if (prev != 0) s.delayGradientUs = static_cast<int32_t>(avg - prev);
-        }
+        s.delayGradientUs = delayStats_.take().gradientUs;
         s.decodeUs = decodeUs_.load();
         s.rttUs = rttUs_.load();
         channel_->send(encode(s));
@@ -278,5 +268,10 @@ void Client::requestKeyframe() {
 }
 
 void Client::reportDecodeUs(uint32_t us) { decodeUs_ = us; }
+
+void Client::reportDecoderDrop() {
+    winDropped_.fetch_add(1);
+    totalDropped_.fetch_add(1);
+}
 
 }  // namespace sd

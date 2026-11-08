@@ -1,8 +1,8 @@
 {
-  "version": "0.1.0",
-  "notes": "这是一个大版本更新\n最多同时连接 4 台设备，每台各有一块屏，设置分开保存\n虚拟屏只在连接时存在，断开后消失\n新增 AMD AMF、Intel Quick Sync 和 CPU 软件编码，可以选择显卡和编码器\n新增画面适配：适应、填充、拉伸和平铺\n串流时的工具条换成吸附在屏幕两侧的把手",
-  "msi": "2befa4e877e18c23d5e9342112bf39789c6c6ebafc6d6fc92ea1762e447e3505",
-  "arm64-v8a": "7776ea04844ffcdc7c78cd7d8967aa6519cf6e130fc34a91645805e1303a3d7a",
-  "armeabi-v7a": "57a637521d7abd74668b179be46bbb615169859906e2120fcbf8292afa6176f1",
-  "x86_64": "f6bddbec92d7849d3301027f580e23e7d548cb336682901b9bd27a676c269246"
+  "version": "0.1.1",
+  "notes": "⚠️【必须先卸载旧版】Android 签名证书已更换，不能覆盖安装。请先卸载旧版，再安装 0.1.1；卸载会清除应用本地数据。\n\n本次更新：修复延迟统计并限制解码积压。",
+  "msi": "ca1a17bbb0dc9e946db40955a28d5e2fc59b2ec403628c8864df6b25abd4a089",
+  "arm64-v8a": "78589660efa66e118f0dc65b6915ca4ebbe41bf784d5fbc6fc05987bf7c81b07",
+  "armeabi-v7a": "6d23f91935171d8e4887e9225d529edc1212c15d39f5d1d517fa1d0ce685d07e",
+  "x86_64": "329d32e140b2445a668e0639d3699fad2c82c714b53397f16aae15eb37a37742"
 }
